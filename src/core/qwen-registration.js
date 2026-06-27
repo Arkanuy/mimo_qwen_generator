@@ -92,10 +92,10 @@ export class QwenRegistration extends EventEmitter {
     return data.address;
   }
 
-  async _pollTempmailMessages(address, timeout = 120000, interval = 5000, afterTime = 0) {
+  async _pollTempmailMessages(address, timeout = 300000, interval = 3000) {
     const headers = { 'Content-Type': 'application/json' };
     if (this.tempmailSession) headers['x-session-id'] = this.tempmailSession;
-    this.log(`polling ${address} (session: ${(this.tempmailSession || 'none').slice(0, 8)}..., timeout: ${timeout/1000}s, afterTime: ${afterTime ? 'yes' : 'no'})`);
+    this.log(`polling ${address} (session: ${(this.tempmailSession || 'none').slice(0, 8)}..., timeout: ${timeout/1000}s)`);
 
     const deadline = Date.now() + timeout;
     let attempt = 0;
@@ -105,26 +105,8 @@ export class QwenRegistration extends EventEmitter {
         const res = await fetch(`${this.tempmailUrl}/inboxes/${encodeURIComponent(address)}/messages`, { headers });
         if (res.ok) {
           const messages = await res.json();
-          if (messages && messages.length > 0) {
-            if (afterTime > 0) {
-              const fresh = messages.filter(m => {
-                const t = m.received_at || m.created_at || m.date || '';
-                if (!t) return true;
-                return new Date(t).getTime() > afterTime;
-              });
-              if (fresh.length > 0) return fresh;
-              // Log that we found messages but none passed the time filter
-              if (attempt <= 3 || attempt % 5 === 0) {
-                this.log(`found ${messages.length} msg(s) but none after time filter (latest: ${messages[0].received_at || 'no timestamp'})`);
-              }
-            } else {
-              return messages;
-            }
-          } else {
-            if (attempt <= 3 || attempt % 5 === 0) {
-              this.log(`poll #${attempt}: 0 messages`);
-            }
-          }
+          if (messages && messages.length > 0) return messages;
+          if (attempt <= 3 || attempt % 10 === 0) this.log(`poll #${attempt}: 0 messages`);
         } else {
           this.log(`poll #${attempt}: HTTP ${res.status}`);
         }
@@ -312,20 +294,64 @@ export class QwenRegistration extends EventEmitter {
       }
     } catch {}
 
-    // Wait for country page or dashboard
+    // Take screenshot after OTP for debugging
+    try {
+      const ssPath = `/tmp/otp-after-${email?.split('@')[0] || 'unknown'}.png`;
+      await this.page.screenshot({ path: ssPath, fullPage: false });
+      this.log(`screenshot saved: ${ssPath}`);
+    } catch {}
+
+    // Check current URL for debugging
+    const otpUrl = this.page.url();
+    this.log(`after OTP URL: ${otpUrl}`);
+
+    // Check for OTP error messages immediately
+    try {
+      const errText = await this.page.evaluate(() => {
+        const els = document.querySelectorAll('[class*="error"], [class*="Error"], [class*="alert"], [class*="Alert"], [role="alert"]');
+        return Array.from(els).map(e => e.innerText).filter(t => t.trim()).join(' | ');
+      });
+      if (errText && (errText.toLowerCase().includes('incorrect') || errText.toLowerCase().includes('invalid') || errText.toLowerCase().includes('wrong') || errText.toLowerCase().includes('expired') || errText.toLowerCase().includes('fail'))) {
+        this.log(`OTP error detected: ${errText}`);
+        return { status: 'error', reason: `otp-error: ${errText.substring(0, 200)}` };
+      }
+    } catch {}
+
+    // Wait for country page or dashboard with expanded detection
     let onCountryPage = false;
-    const countryDeadline = Date.now() + 20000;
+    const countryDeadline = Date.now() + 30000;
     while (Date.now() < countryDeadline) {
       try {
         const body = await this.page.evaluate(() => document.body.innerText.toLowerCase());
-        if (body.includes('select your country') || body.includes('country/region')) {
+        const url = this.page.url();
+
+        // Country/region selection page
+        if (body.includes('select your country') || body.includes('country/region')
+          || body.includes('select country') || body.includes('choose your country')
+          || body.includes('country or region') || (body.includes('country') && body.includes('region') && body.includes('select'))
+          || (url.includes('/register') && (body.includes('agree') || body.includes('continue')))) {
           onCountryPage = true;
+          this.log('detected country/registration page');
           break;
         }
-        if (body.includes('dashboard') || body.includes('api key') || body.includes('welcome')) {
-          // Already on dashboard — skip country
+        // Already on dashboard — skip country
+        if (body.includes('dashboard') || body.includes('api key') || body.includes('welcome')
+          || url.includes('/api-keys') || url.includes('/dashboard')) {
           this.log('reached dashboard directly');
           return { status: 'signup-ok' };
+        }
+        // Check if we were redirected back to landing/home (OTP likely failed)
+        if (url.includes('home.qwencloud.com') && !url.includes('/sso/') && !url.includes('/register')) {
+          const elapsed = Date.now() - (countryDeadline - 30000);
+          if (elapsed > 15000) {
+            this.log(`redirected to homepage after ${(elapsed/1000).toFixed(0)}s — OTP likely failed`);
+            try {
+              const ssPath = `/tmp/otp-redirect-${email?.split('@')[0] || 'unknown'}.png`;
+              await this.page.screenshot({ path: ssPath, fullPage: false });
+              this.log(`redirect screenshot: ${ssPath}`);
+            } catch {}
+            return { status: 'error', reason: 'country-page-not-found: redirected-to-homepage (OTP may have failed)' };
+          }
         }
       } catch {}
       await sleep(1000);
@@ -333,7 +359,13 @@ export class QwenRegistration extends EventEmitter {
 
     if (!onCountryPage) {
       const bodyText = await this.page.evaluate(() => document.body.innerText.substring(0, 300)).catch(() => 'unknown');
-      this.log(`after OTP page: ${bodyText.substring(0, 100)}`);
+      const finalUrl = this.page.url();
+      this.log(`country page not found. URL=${finalUrl} body=${bodyText.substring(0, 100)}`);
+      try {
+        const ssPath = `/tmp/otp-fail-${email?.split('@')[0] || 'unknown'}.png`;
+        await this.page.screenshot({ path: ssPath, fullPage: false });
+        this.log(`fail screenshot: ${ssPath}`);
+      } catch {}
       return { status: 'error', reason: 'country-page-not-found' };
     }
 
@@ -433,26 +465,15 @@ export class QwenRegistration extends EventEmitter {
   // ── Verification Code ────────────────────────────────
   async _getVerificationCode(email, afterTime = 0) {
     this.log(`polling tempmail for verification code...`);
+    // Skip afterTime filter — the inbox is freshly created, all messages belong to this session
     try {
-      // First try: with afterTime filter (strict — only new emails)
-      const messages = await this._pollTempmailMessages(email, 120000, 4000, afterTime);
+      const messages = await this._pollTempmailMessages(email, 300000, 3000, 0);
       const code = this._extractCode(messages);
       if (code) { this.log(`verification code: ${code}`); return code; }
     } catch (e) {
-      this.log(`poll attempt 1: ${e.message}`);
+      this.log(`poll error: ${e.message}`);
     }
-
-    // Fallback: retry without afterTime filter (accept any email in inbox)
-    this.log(`retrying without time filter...`);
-    try {
-      const messages = await this._pollTempmailMessages(email, 60000, 3000, 0);
-      const code = this._extractCode(messages);
-      if (code) { this.log(`verification code (fallback): ${code}`); return code; }
-    } catch (e) {
-      this.log(`poll attempt 2: ${e.message}`);
-    }
-
-    this.log(`verification code not found after all attempts`);
+    this.log(`verification code not found`);
     return null;
   }
 

@@ -1,13 +1,12 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { useRouter } from "next/navigation";
 import { AnimatePresence } from "framer-motion";
+import { useRouter } from "next/navigation";
 import { BatchTable } from "@/components/dashboard/batch-table";
 import { LogTerminal } from "@/components/dashboard/terminal";
 import { ConfigPanel } from "@/components/dashboard/config-panel";
-import { Activity, Layers, Cpu, LogOut, Users } from "lucide-react";
-import { TempmailViewer } from "@/components/dashboard/tempmail-viewer";
+import { Activity, Layers, Cpu, LogOut, Users, Mail } from "lucide-react";
 import { getMe, logout } from "@/lib/auth";
 
 const API = "";
@@ -136,6 +135,7 @@ export default function Dashboard() {
 
   const selectedBatchData = batches.find(b => b.id === selectedBatch);
   const liveLogs = selectedBatchData?.logs || [];
+
   const totalSuccess = batches.reduce((s, b) => s + b.progress.success, 0);
   const totalFailed = batches.reduce((s, b) => s + b.progress.failed, 0);
   const runningCount = batches.filter(b => b.status === "running").length;
@@ -168,6 +168,10 @@ export default function Dashboard() {
                 <div className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse" />{runningCount} running
               </div>
             )}
+            <button onClick={() => router.push("/tempmail")}
+              className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors bg-muted/50 border border-border/50 px-3 py-1.5 rounded-lg">
+              <Mail className="w-3 h-3" /> Tempmail
+            </button>
             <button onClick={() => router.push("/status")}
               className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors bg-muted/50 border border-border/50 px-3 py-1.5 rounded-lg">
               <Users className="w-3 h-3" /> Public
@@ -205,12 +209,8 @@ export default function Dashboard() {
           <BatchTable batches={batches} selectedBatch={selectedBatch} onSelect={setSelectedBatch} onStop={handleStop} onDelete={handleDelete} />
         </div>
 
-        {/* Tempmail Inbox */}
-        <div className="mb-4 sm:mb-6">
-          <TempmailViewer />
-        </div>
 
-        {/* Rich Terminal */}
+        {/* Single terminal view */}
         <AnimatePresence>
           {selectedBatch && (
             <LogTerminal logs={liveLogs} batchId={selectedBatch} onClose={() => setSelectedBatch(null)} />

@@ -341,10 +341,7 @@ export function BatchTable({ batches, selectedBatch, onSelect, onStop, onDelete 
         ))}
       </AnimatePresence>
 
-      {/* Detail Overlay */}
-      <AnimatePresence>
-        {selected && <BatchDetailOverlay batch={selected} onClose={() => onSelect(null)} onStop={onStop} />}
-      </AnimatePresence>
+      {/* Overlay removed — LogTerminal handles all batch detail views */}
     </div>
   );
 }
