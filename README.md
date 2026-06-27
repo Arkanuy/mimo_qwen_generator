@@ -231,5 +231,5 @@ SOFTWARE.
 ---
 
 <p align="center">
-  <b>Made with ☕ by Arkanuy</b>
+  <b>Made with ☕ by masantoid</b>
 </p>
