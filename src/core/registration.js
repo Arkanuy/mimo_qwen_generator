@@ -10,7 +10,7 @@ import { join } from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
 import { TempmailClient } from '../clients/tempmail.js';
-import { CaptchaSolver } from '../clients/captcha.js';
+import { createCaptchaSolver } from '../clients/captcha.js';
 import { generateFingerprint, buildInitScript, buildExtraHeaders } from '../browser/fingerprint.js';
 import { humanFill, humanFillLocator, humanClick, humanType, humanDelay } from '../browser/human.js';
 
@@ -40,7 +40,7 @@ class MimoRegistration {
   constructor(config) {
     this.config = config;
     this.tempmail = new TempmailClient(config.tempmail.apiUrl);
-    this.captcha = new CaptchaSolver(config.captcha.apiKey);
+    this.captcha = createCaptchaSolver(config.captcha);
     this.browser = null;
     this.page = null;
   }
@@ -55,6 +55,7 @@ class MimoRegistration {
       // Step 1: Create tempmail
       console.log('[Step 1/7] Creating temporary email...');
       const email = await this.tempmail.createInbox();
+      this.email = email; // Store for OAuth re-login
       console.log(`✓ Email created: ${email}`);
       console.log();
 
@@ -168,12 +169,8 @@ class MimoRegistration {
       const passToken = passTokenCookie ? passTokenCookie.value : null;
       const serviceToken = serviceTokenCookie ? serviceTokenCookie.value : null;
 
-      // 1. Redeem invite code (dulu sebelum apply form, biar saldo $2 langsung masuk)
-      try {
-        await this.redeemInviteCode();
-      } catch (inviteErr) {
-        console.log('  ! Failed to complete invite code redemption:', inviteErr.message);
-      }
+      // 1. Skip invite code redemption (risk control / account restricted issues)
+      console.log('  ⏭ Skipping invite code redemption');
 
       // 2. Create API Key
       let apiKey = null;
@@ -306,10 +303,14 @@ class MimoRegistration {
     if (!tabClicked) console.log('  ! Sign up tab not found — may already be on signup form');
     await this.page.waitForTimeout(3000);
 
-    // 3. Wait for email input — name="email" setelah klik Sign up
+    // Panel selector — scope semua input ke Sign up tab panel
+    // Xiaomi pakai Ant Design tabs dengan id pattern: rc-tabs-0-panel-{tabKey}
+    const PANEL = '#rc-tabs-0-panel-register';
+
+    // 3. Wait for email input — scoped ke register panel
     for (let attempt = 0; attempt < 5; attempt++) {
       try {
-        await this.page.waitForSelector('input[name="email"]', { timeout: 8000 });
+        await this.page.waitForSelector(`${PANEL} input[name="email"], ${PANEL} input[aria-label="Email"]`, { timeout: 8000 });
         console.log('  ✓ Signup form visible');
         break;
       } catch (e) {
@@ -317,59 +318,203 @@ class MimoRegistration {
           console.log(`  ! Email input not ready (attempt ${attempt + 1}/5), retrying...`);
           await this.page.waitForTimeout(2000);
         } else {
-          throw e;
+          // Fallback: coba tanpa panel scope
+          try {
+            await this.page.waitForSelector('input[name="email"]', { timeout: 5000 });
+            console.log('  ✓ Signup form visible (fallback selector)');
+          } catch (e2) {
+            throw e;
+          }
         }
       }
     }
 
-    // 4. Fill email
-    await humanFill(this.page, 'input[name="email"]', email);
-    console.log('  ✓ Filled email');
+    // Helper: set value via React native setter + verify
+    // Helper: set value via React-compatible method + verify
+    const reactFill = async (selector, value, label) => {
+      const handle = await this.page.$(selector);
+      if (!handle) {
+        console.log(`  ! ${label} field not found: ${selector}`);
+        return false;
+      }
+      const visible = await handle.isVisible().catch(() => false);
+      if (!visible) {
+        console.log(`  ! ${label} field not visible: ${selector}`);
+        return false;
+      }
+
+      // Scroll into view + tunggu stabil
+      await handle.scrollIntoViewIfNeeded().catch(() => {});
+      await humanDelay(200, 400);
+
+      // Klik field — pakai force:true untuk bypass overlay/animation
+      await handle.click({ force: true, delay: 50 }).catch(async () => {
+        await handle.focus().catch(() => {});
+      });
+      await humanDelay(200, 400);
+
+      // STRATEGY 1: Playwright .fill() — paling reliable untuk React controlled inputs.
+      // .fill() properly triggers React's synthetic event system tanpa fight.
+      try {
+        await handle.fill(value);
+        await humanDelay(150, 300);
+        const actual = await handle.evaluate(n => n.value).catch(() => '');
+        if (actual === value) {
+          console.log(`  ✓ ${label} filled via .fill()`);
+          return true;
+        }
+        console.log(`  ! ${label} .fill() value mismatch (got "${actual}"), trying native setter...`);
+      } catch (e) {
+        console.log(`  ! ${label} .fill() failed: ${e.message}, trying native setter...`);
+      }
+
+      // STRATEGY 2: Native setter fallback — for inputs that reject .fill()
+      // Focus first
+      const isFocused = await handle.evaluate(n => document.activeElement === n).catch(() => false);
+      if (!isFocused) {
+        await handle.evaluate(n => n.focus());
+        await humanDelay(100, 200);
+      }
+
+      // Clear existing value
+      await this.page.keyboard.press('Control+A');
+      await humanDelay(40, 80);
+      await this.page.keyboard.press('Delete');
+      await humanDelay(60, 120);
+
+      // Set via React native setter (bypass hijacked value property)
+      await handle.evaluate((node, val) => {
+        const nativeSetter = Object.getOwnPropertyDescriptor(
+          window.HTMLInputElement.prototype, 'value'
+        ).set;
+        nativeSetter.call(node, val);
+        // Trigger React events
+        node.dispatchEvent(new Event('input', { bubbles: true }));
+        node.dispatchEvent(new Event('change', { bubbles: true }));
+        // Also trigger React 17+ specific event
+        const tracker = node._valueTracker;
+        if (tracker) tracker.setValue('');
+        node.dispatchEvent(new Event('input', { bubbles: true }));
+      }, value);
+
+      await humanDelay(150, 300);
+
+      // Verify value was set
+      const actual = await handle.evaluate(n => n.value).catch(() => '');
+      if (actual === value) {
+        console.log(`  ✓ ${label} filled via native setter`);
+        return true;
+      }
+
+      // STRATEGY 3: Keyboard typing as last resort
+      console.log(`  ! ${label} native setter mismatch, trying keyboard typing...`);
+      await handle.evaluate(n => { n.value = ''; n.focus(); });
+      await humanDelay(60, 120);
+      for (const ch of value) {
+        await this.page.keyboard.type(ch, { delay: 40 + Math.random() * 60 });
+        await humanDelay(10, 30);
+      }
+      await humanDelay(150, 300);
+      const finalVal = await handle.evaluate(n => n.value).catch(() => '');
+      if (finalVal === value) {
+        console.log(`  ✓ ${label} filled via keyboard typing`);
+        return true;
+      }
+      console.log(`  ! ${label} still mismatch after all strategies — proceeding anyway`);
+      return false;
+    };
+
+    // 4. Fill email — scoped ke register panel
+    const emailSel = `${PANEL} input[name="email"]`;
+    const emailFallback = 'input[name="email"]';
+    const emailOk = await reactFill(emailSel, email, 'Email');
+    if (!emailOk) await reactFill(emailFallback, email, 'Email (fallback)');
     await humanDelay(200, 500);
 
-    // 5. Fill password (name="password")
-    const pwdField = this.page.locator('input[name="password"]').first();
-    if (await pwdField.count() > 0 && await pwdField.isVisible()) {
-      await humanFill(this.page, pwdField, this.config.xiaomi.password);
-      console.log('  ✓ Filled password');
-    }
+    // 5. Fill password — scoped ke register panel (hindari Sign in punya password field)
+    const pwdSel = `${PANEL} input[name="password"]`;
+    const pwdFallback = 'input[name="password"]';
+    let pwdOk = await reactFill(pwdSel, this.config.xiaomi.password, 'Password');
+    if (!pwdOk) pwdOk = await reactFill(pwdFallback, this.config.xiaomi.password, 'Password (fallback)');
+    await humanDelay(150, 400);
 
-    // 5. Fill confirm password (name="repassword")
-    const repwdField = this.page.locator('input[name="repassword"]').first();
-    if (await repwdField.count() > 0 && await repwdField.isVisible()) {
-      await humanDelay(200, 450);
-      await humanFill(this.page, repwdField, this.config.xiaomi.password);
-      console.log('  ✓ Filled confirm password');
-    }
+    // 6. Fill confirm password — scoped ke register panel
+    const repwdSel = `${PANEL} input[name="repassword"]`;
+    const repwdFallback = 'input[name="repassword"]';
+    let repwdOk = await reactFill(repwdSel, this.config.xiaomi.password, 'Confirm Password');
+    if (!repwdOk) repwdOk = await reactFill(repwdFallback, this.config.xiaomi.password, 'Confirm Password (fallback)');
+    await humanDelay(200, 450);
 
-    // 6. Check terms agreement checkbox — klik wrapper Ant Design biar onChange ke-trigger
-    const termsChecked = await this.page.evaluate(() => {
-      const wrapper = document.querySelector('.ant-checkbox-wrapper');
-      if (wrapper && wrapper.offsetHeight > 0) {
+    // 7. Check terms agreement checkbox — scoped ke register panel
+    //    Ant Design checkbox: klik wrapper-nya biar onChange ke-trigger
+    const termsChecked = await this.page.evaluate((panel) => {
+      // Cari checkbox wrapper di dalam panel register
+      const panelEl = document.querySelector(panel);
+      const scope = panelEl || document;
+
+      const wrappers = Array.from(scope.querySelectorAll('.ant-checkbox-wrapper'));
+      const wrapper = wrappers.find(w => w.offsetHeight > 0);
+
+      if (wrapper) {
         wrapper.click();
         const input = wrapper.querySelector('.ant-checkbox-input, input[type="checkbox"]');
         return input ? input.checked : true;
       }
-      const cb = document.querySelector('input[type="checkbox"]');
-      if (cb && cb.offsetHeight > 0) {
+
+      // Fallback: langsung ke input checkbox
+      const cbs = Array.from(scope.querySelectorAll('input[type="checkbox"]'));
+      const cb = cbs.find(c => c.offsetHeight > 0);
+      if (cb) {
         cb.click();
         return cb.checked;
       }
       return false;
-    });
+    }, PANEL);
+
     if (termsChecked) {
       console.log('  ✓ Checked terms agreement');
     } else {
-      // Fallback Playwright
+      // Fallback Playwright — scope ke panel
       try {
-        await this.page.click('.ant-checkbox-wrapper', { timeout: 3000 });
-        console.log('  ✓ Checked terms (Playwright fallback)');
+        const checkbox = this.page.locator(`${PANEL} .ant-checkbox-wrapper`).first();
+        if (await checkbox.count() > 0 && await checkbox.isVisible()) {
+          await checkbox.click({ timeout: 3000 });
+          console.log('  ✓ Checked terms (Playwright scoped)');
+        } else {
+          await this.page.click('.ant-checkbox-wrapper', { timeout: 3000 });
+          console.log('  ✓ Checked terms (Playwright global fallback)');
+        }
       } catch (e) {
         console.log('  ! Could not check terms checkbox');
       }
     }
-  }
 
+    // 8. Verify submit button enabled — kalau masih disabled, form belum valid
+    await humanDelay(300, 600);
+    const submitDisabled = await this.page.evaluate((panel) => {
+      const panelEl = document.querySelector(panel);
+      const scope = panelEl || document;
+      const btn = scope.querySelector('button[type="submit"], button.mi-button--primary');
+      return btn ? btn.disabled : true;
+    }, PANEL);
+
+    if (submitDisabled) {
+      console.log('  ! Submit button still disabled — form may be invalid');
+      // Debug: dump field values
+      const debug = await this.page.evaluate((panel) => {
+        const panelEl = document.querySelector(panel);
+        const scope = panelEl || document;
+        const inputs = Array.from(scope.querySelectorAll('input'));
+        return inputs.filter(i => i.offsetHeight > 0).map(i => ({
+          name: i.name, type: i.type, value: i.value.substring(0, 30),
+          ariaInvalid: i.getAttribute('aria-invalid'),
+        }));
+      }, PANEL);
+      console.log('  Form fields:', JSON.stringify(debug, null, 2));
+    } else {
+      console.log('  ✓ Submit button enabled — form ready');
+    }
+  }
   async handleXiaomiCaptcha() {
     // Wait for Xiaomi captcha modal to appear after submit
     console.log('  Waiting for Xiaomi captcha modal...');
@@ -550,19 +695,16 @@ class MimoRegistration {
     console.log('  Checking for image verification code modal...');
     
     try {
-      // 1. Wait up to 7 seconds for the image captcha element to appear
-      // If it doesn't appear, it means registration went straight to email verification
+      // 1. Wait for the image captcha input to appear (more reliable than img selector)
       try {
-        await this.page.waitForSelector('img[src*="captcha"], img[src*="getCaptcha"], img[src*="code"], img[class*="captcha"]', { 
-          timeout: 7000 
-        });
-        console.log('  ✓ Image captcha element detected');
+        await this.page.waitForSelector('input[name="icode"]', { timeout: 7000 });
+        console.log('  ✓ Image captcha input detected');
       } catch (e) {
-        console.log('  No image captcha element detected (likely proceeded to email verification)');
+        console.log('  No image captcha detected (likely proceeded to email verification)');
         return;
       }
 
-      let imageRetries = 3;
+      let imageRetries = 7;
       let solvedImage = false;
 
       while (imageRetries > 0 && !solvedImage) {
@@ -573,24 +715,56 @@ class MimoRegistration {
           return;
         }
 
-        // 3. Locate the captcha image element
-        let captchaImg = await this.page.$('img[src*="captcha"], img[src*="getCaptcha"], img[src*="code"], img[class*="captcha"]');
-        if (!captchaImg) {
-          throw new Error('Could not locate captcha image element');
+        // 3. Get captcha image — use canvas render to get exact pixels shown in browser.
+        //    HTTP fetch returns a DIFFERENT image (server generates new one per request).
+        console.log(`  Getting captcha image (attempt ${8 - imageRetries}/7)...`);
+        let base64Image;
+        try {
+          // Fetch captcha image directly via HTTP (shares browser session/cookies)
+          const imgSrc = await this.page.evaluate(() => {
+            const img = document.querySelector('img.mi-captcha-field__image, img[src*="getCode"]');
+            return img ? img.src : null;
+          });
+          if (!imgSrc) throw new Error('Captcha image src not found');
+          
+          const response = await this.page.request.get(imgSrc);
+          const buf = await response.body();
+          base64Image = buf.toString('base64');
+          console.log(`  ✓ Captcha image fetched via HTTP (${buf.length} bytes)`);
+        } catch (fetchErr) {
+          console.log(`  ! HTTP fetch failed (${fetchErr.message}), trying screenshot...`);
+          const captchaImg = await this.page.$('img.mi-captcha-field__image, img[src*="getCode"]');
+          if (!captchaImg) throw new Error('Captcha image element not found');
+          await captchaImg.evaluate(img => new Promise(r => {
+            if (img.complete && img.naturalWidth > 0) return r();
+            img.onload = r; img.onerror = r; setTimeout(r, 3000);
+          })).catch(() => {});
+          await humanDelay(300, 600);
+          const imgBuffer = await captchaImg.screenshot();
+          base64Image = imgBuffer.toString('base64');
         }
 
-        // 4. Take a screenshot of the captcha image element
-        console.log(`  Taking screenshot of captcha image (attempt ${4 - imageRetries}/3)...`);
-        const imgBuffer = await captchaImg.screenshot();
-        const base64Image = imgBuffer.toString('base64');
-
-        // 5. Solve using 2Captcha
+        // 4. Solve using CapMonster
         const solution = await this.captcha.solveImageCaptcha(base64Image);
         console.log(`  ✓ Image captcha solved: ${solution}`);
 
-        // 6. Fill code and submit
-        await humanFill(this.page, codeInput, solution, { clear: 'select-all' });
-        console.log('  ✓ Filled captcha code');
+        // 6. Fill code — use .fill() directly instead of humanFill.
+        // humanFill's "tail typing" trick (types last 2 chars then backspaces)
+        // corrupts short captcha codes like 5-6 chars.
+        await codeInput.click({ force: true }).catch(() => {});
+        await humanDelay(80, 160);
+        await codeInput.fill(solution).catch(async () => {
+          // Fallback: clear + type
+          await codeInput.evaluate((n) => { n.value = ''; });
+          await this.page.keyboard.type(solution, { delay: 50 });
+        });
+        await humanDelay(100, 200);
+        // Verify the value was set correctly
+        const filledValue = await codeInput.evaluate(n => n.value).catch(() => '');
+        if (filledValue !== solution) {
+          console.log(`  ! Captcha fill mismatch: expected "${solution}", got "${filledValue}"`);
+        }
+        console.log(`  ✓ Filled captcha code: ${solution}`);
 
         // Find submit button — cari button "Submit" di form atau modal.
         // Di halaman baru (global.account.xiaomi.com) form-nya `.mi-captcha-code-form`
@@ -663,12 +837,33 @@ class MimoRegistration {
         if (isStillVisible && isErrorVisible) {
           console.log('  ! Entered captcha code was incorrect. Retrying with a new captcha...');
           
-          // Click the captcha image to refresh it
+          // Click the captcha image to refresh it (wrapped in a button)
           try {
-            await captchaImg.click();
-            await this.page.waitForTimeout(2000); // Wait for new image to load
+            const oldSrc = await this.page.evaluate(() => {
+              const img = document.querySelector('img.mi-captcha-field__image, img[src*="getCode"]');
+              return img ? img.src : '';
+            });
+            // Click via evaluate — avoids stale element handle issues
+            await this.page.evaluate(() => {
+              const img = document.querySelector('img.mi-captcha-field__image, img[src*="getCode"]');
+              if (img) img.click();
+            });
+            // Wait for the image src to change (new timestamp param)
+            for (let w = 0; w < 10; w++) {
+              await this.page.waitForTimeout(500);
+              const newSrc = await this.page.evaluate(() => {
+                const img = document.querySelector('img.mi-captcha-field__image, img[src*="getCode"]');
+                return img ? img.src : '';
+              });
+              if (newSrc && newSrc !== oldSrc) {
+                console.log('  ✓ Captcha image refreshed');
+                break;
+              }
+            }
+            // Wait for new image to fully render
+            await this.page.waitForTimeout(1500);
           } catch (err) {
-            console.log('  Could not click captcha image to refresh');
+            console.log(`  Could not refresh captcha image: ${err.message}`);
           }
           
           imageRetries--;
@@ -734,57 +929,122 @@ class MimoRegistration {
 
   async submitRegistration() {
     // Find and click submit button — "Next" is the button text on account.xiaomi.com
+    // Scope to register panel to avoid clicking Sign in button
     console.log('  Looking for submit button...');
+    const PANEL = '#rc-tabs-0-panel-register';
+
+    // Try scoped selectors first
     const submitSelectors = [
+      `${PANEL} button:has-text("Next")`,
+      `${PANEL} button[type="submit"]`,
+      `${PANEL} button.mi-button--primary`,
+      `${PANEL} button:has-text("Sign Up")`,
+      `${PANEL} button:has-text("Register")`,
+      // Fallback global
       'button:has-text("Next")',
       'button[type="submit"]',
-      'input[type="submit"]',
       'button:has-text("Sign Up")',
-      'button:has-text("Register")',
     ];
     let submitButton = null;
     for (const sel of submitSelectors) {
-      submitButton = await this.page.$(sel);
-      if (submitButton) {
-        console.log(`  ✓ Found submit button: ${sel}`);
-        break;
-      }
+      try {
+        const btn = this.page.locator(sel).first();
+        if (await btn.count() > 0 && await btn.isVisible({ timeout: 2000 }).catch(() => false)) {
+          submitButton = btn;
+          console.log(`  ✓ Found submit button: ${sel}`);
+          break;
+        }
+      } catch (e) {}
     }
 
     if (!submitButton) {
-      // Fallback DOM eval
-      const clicked = await this.page.evaluate(() => {
-        const btns = Array.from(document.querySelectorAll('button'));
+      // Fallback DOM eval — scope ke register panel
+      const clicked = await this.page.evaluate((panel) => {
+        const panelEl = document.querySelector(panel);
+        const scope = panelEl || document;
+        const btns = Array.from(scope.querySelectorAll('button'));
         const target = btns.find(b => {
           const txt = (b.textContent || '').trim();
-          return txt === 'Next' && b.offsetHeight > 0;
+          return (txt === 'Next' || txt === 'Sign Up' || txt === 'Register') && b.offsetHeight > 0;
         });
         if (target) { target.click(); return true; }
         return false;
-      });
+      }, PANEL);
       if (clicked) {
         console.log('  ✓ Clicked Next (DOM eval fallback)');
       } else {
         throw new Error('Submit button not found');
       }
     } else {
-      await submitButton.click();
+      // Click the Next button — try multiple strategies for React compatibility
+      const btnHandle = await submitButton.elementHandle();
+      
+      // Strategy 1: Scroll into view + proper mouse click
+      await submitButton.scrollIntoViewIfNeeded().catch(() => {});
+      await humanDelay(200, 400);
+      
+      let clickSuccess = false;
+      try {
+        await submitButton.click({ timeout: 5000 });
+        clickSuccess = true;
+        console.log('  ✓ Clicked Next (standard click)');
+      } catch (e1) {
+        // Strategy 2: Force click
+        try {
+          await submitButton.click({ force: true, timeout: 3000 });
+          clickSuccess = true;
+          console.log('  ✓ Clicked Next (force click)');
+        } catch (e2) {
+          // Strategy 3: DOM click via evaluate
+          const clicked = await this.page.evaluate((panel) => {
+            const panelEl = document.querySelector(panel);
+            const scope = panelEl || document;
+            const btns = Array.from(scope.querySelectorAll('button'));
+            const target = btns.find(b => {
+              const txt = (b.textContent || '').trim();
+              return txt === 'Next' && b.offsetHeight > 0;
+            });
+            if (target) {
+              // Simulate real mouse events for React
+              target.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+              target.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+              target.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+              return true;
+            }
+            return false;
+          }, PANEL);
+          if (clicked) {
+            clickSuccess = true;
+            console.log('  ✓ Clicked Next (DOM dispatch)');
+          }
+        }
+      }
+
+      if (!clickSuccess) {
+        // Last resort: keyboard Enter while button focused
+        if (btnHandle) await btnHandle.focus().catch(() => {});
+        await this.page.keyboard.press('Enter');
+        console.log('  ✓ Pressed Enter on Next button');
+      }
     }
 
-    // Wait for navigation or captcha modal to appear
-    console.log('  Waiting for navigation or captcha modal...');
+    // Wait for captcha modal to appear — this is the critical step
+    console.log('  Waiting for captcha modal...');
+    await humanDelay(1000, 2000);
+    // Give the page time to process the form submission
     try {
       await Promise.race([
-        this.page.waitForNavigation({ timeout: 10000 }),
-        this.page.waitForSelector('.miverify_wind:not([style*="display: none"])', { timeout: 10000 }),
-        this.page.waitForSelector('[class*="captcha"], [class*="verify"]', { timeout: 10000 }),
+        this.page.waitForNavigation({ timeout: 8000 }),
+        this.page.waitForSelector('.miverify_wind', { timeout: 8000 }),
+        this.page.waitForSelector('.mi-captcha-code-form', { timeout: 8000 }),
+        this.page.waitForSelector('iframe[src*="recaptcha"]', { timeout: 8000 }),
+        this.page.waitForSelector('[class*="captcha"]', { timeout: 8000 }),
       ]);
+      console.log('  ✓ Page responded after submit');
     } catch (e) {
-      // Ignore timeout/error, proceed to captcha check
-      await this.page.waitForTimeout(1500);
+      console.log('  ! No captcha/navigation detected after 8s');
     }
   }
-
   async verifyEmail(email) {
     // Wait for verification email
     console.log('  Waiting for verification email...');
@@ -818,26 +1078,97 @@ class MimoRegistration {
       throw new Error('Verification code input not found');
     }
 
-    // Fill and submit verification code — ketik per karakter biar gak instant paste
-    await humanFill(this.page, verificationInput, code);
-    console.log('  ✓ Filled verification code');
+    // Detect if this is OTP-style (multiple separate digit inputs) or single input
+    // Xiaomi email verify page uses 6 separate input boxes
+    const allVisibleInputs = await this.page.$$('input:visible');
+    const otpInputs = [];
+    for (const inp of allVisibleInputs) {
+      const attrs = await inp.evaluate(el => ({
+        type: el.type,
+        maxLength: el.maxLength,
+        className: el.className || '',
+        name: el.name || '',
+        width: el.offsetWidth,
+        height: el.offsetHeight,
+      })).catch(() => null);
+      if (!attrs) continue;
+      // OTP boxes: text type, small width, maxLength 1-2, or matching known Xiaomi classes
+      const isOtp = (
+        (attrs.maxLength >= 1 && attrs.maxLength <= 2 && attrs.width < 80) ||
+        attrs.className.includes('otp') ||
+        attrs.className.includes('verify') ||
+        attrs.className.includes('code-input') ||
+        attrs.name === 'code'
+      );
+      if (isOtp && attrs.width > 10 && attrs.height > 10) {
+        otpInputs.push(inp);
+      }
+    }
 
+    if (otpInputs.length >= code.length) {
+      // OTP-style: fill each digit in its own input box
+      console.log(`  Detected ${otpInputs.length} OTP input boxes, filling ${code.length} digits...`);
+      for (let i = 0; i < code.length; i++) {
+        const inp = otpInputs[i];
+        try {
+          await inp.click({ force: true });
+          await humanDelay(40, 100);
+          await inp.fill(code[i]);
+        } catch (e) {
+          // fallback: focus + type
+          await inp.focus().catch(() => {});
+          await this.page.keyboard.type(code[i], { delay: 50 + Math.floor(Math.random() * 80) });
+        }
+        await humanDelay(80, 200);
+      }
+      console.log('  ✓ Filled verification code (OTP boxes)');
+    } else {
+      // Single input field — fill entire code
+      console.log('  Single verification input, filling full code...');
+      await verificationInput.click({ force: true }).catch(() => {});
+      await humanDelay(80, 160);
+      await verificationInput.fill(code).catch(async () => {
+        await humanFill(this.page, verificationInput, code);
+      });
+      await humanDelay(100, 200);
+      const filledVal = await verificationInput.evaluate(n => n.value).catch(() => '');
+      console.log(`  ✓ Filled verification code (value in input: "${filledVal}")`);
+    }
+
+    // Find and click submit/verify button
     const verifyButton = await this.page.$('button:has-text("Submit"), button:has-text("Verify"), button:has-text("Confirm"), button[type="submit"]');
     if (verifyButton) {
       try {
         await verifyButton.click({ timeout: 5000 });
         console.log('  ✓ Clicked Submit/Verify button');
       } catch (clickErr) {
-        console.log('  ! Submit button click failed, pressing Enter key instead...');
-        await verificationInput.press('Enter');
+        console.log('  ! Submit button click failed, trying force click...');
+        try {
+          await verifyButton.click({ force: true, timeout: 3000 });
+          console.log('  ✓ Clicked Submit/Verify (force)');
+        } catch (e2) {
+          await verificationInput.press('Enter');
+        }
       }
     } else {
       await verificationInput.press('Enter');
       console.log('  ✓ Pressed Enter on input');
     }
 
-    // Wait for verification success
-    await this.page.waitForTimeout(5000);
+    // Wait for verification success — wait for URL change or navigation
+    const currentUrl = this.page.url();
+    try {
+      await this.page.waitForFunction(
+        (oldUrl) => window.location.href !== oldUrl,
+        currentUrl,
+        { timeout: 10000 }
+      );
+      console.log('  ✓ Page navigated after verification');
+    } catch (e) {
+      console.log('  ! No navigation detected after 10s, continuing...');
+    }
+    await this.page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
+    await humanDelay(1000, 2000);
   }
 
   async clickConsoleMenu() {
@@ -1127,30 +1458,96 @@ class MimoRegistration {
 
   async handleOAuthRedirect() {
     let currentUrl = this.page.url();
-    if (currentUrl.includes('account.xiaomi.com') || currentUrl.includes('login') || currentUrl.includes('auth')) {
-      console.log('  Redirected to authorization page, logging in...');
+    if (!currentUrl.includes('account.xiaomi.com') && !currentUrl.includes('login') && !currentUrl.includes('auth')) {
+      return; // Not on login page, nothing to do
+    }
+    
+    console.log('  Redirected to authorization page, signing in...');
+    await this.page.waitForTimeout(2000);
+    
+    // Check if we are on a SIGN IN page (need to re-enter credentials)
+    const emailInput = await this.page.$('input[name="user"], input[name="email"], input[placeholder*="Email" i], input[placeholder*="Account" i], input[type="email"]');
+    const passwordInput = await this.page.$('input[name="password"], input[type="password"]');
+    
+    if (emailInput && passwordInput) {
+      console.log('  Login form detected — re-entering credentials...');
+      // We need to sign in again
+      // First check if we need to click "Sign in" tab (not "Sign up")
+      const signInTab = await this.page.$('.ant-tabs-tab-btn:has-text("Sign in"), [role="tab"]:has-text("Sign in")');
+      if (signInTab) {
+        await signInTab.click({ force: true }).catch(() => {});
+        await this.page.waitForTimeout(1000);
+      }
       
-      // Wait a moment for page/modals to load
-      await this.page.waitForTimeout(2000);
+      // Fill email/phone
+      const emailField = await this.page.$('input[name="user"], input[name="email"], input[placeholder*="Email" i], input[placeholder*="Account" i]');
+      if (emailField) {
+        await emailField.fill(this.email || '').catch(() => {});
+        // If email not set, try from the page context
+        const filledEmail = await emailField.evaluate(n => n.value).catch(() => '');
+        if (!filledEmail) {
+          // Extract email from the URL if present
+          const urlEmail = this.page.url().match(/_user=([^&]+)/);
+          if (urlEmail) {
+            await emailField.fill(decodeURIComponent(urlEmail[1])).catch(() => {});
+          }
+        }
+      }
       
-      // Check if "Attention" agreement modal is present and click Agree
-      const agreeBtn = await this.page.$('.miui-modal-wrap button:has-text("Agree"), button:has-text("Agree"), .miui-modal-wrap .btn-primary');
-      if (agreeBtn) {
-        console.log('  Found Xiaomi Account Agreement modal ("Attention") during OAuth redirect, clicking Agree...');
-        await agreeBtn.click({ force: true });
+      // Fill password
+      const pwdField = await this.page.$('input[name="password"], input[type="password"]');
+      if (pwdField) {
+        await pwdField.fill(this.config.xiaomi.password).catch(() => {});
+      }
+      
+      await this.page.waitForTimeout(500);
+      
+      // Click Sign in button
+      const signInBtn = await this.page.$('button:has-text("Sign in"), button[type="submit"], .ant-btn-primary:has-text("Sign in")');
+      if (signInBtn) {
+        await signInBtn.click({ force: true }).catch(() => {});
+        console.log('  ✓ Clicked Sign in button');
+        try {
+          await this.page.waitForNavigation({ waitUntil: 'networkidle', timeout: 15000 });
+        } catch (e) {}
         await this.page.waitForTimeout(3000);
       }
       
-      // Wait for authorize button
-      const authBtn = await this.page.waitForSelector('button:has-text("Agree"), button:has-text("Authorize"), button:has-text("Sign in"), #accept, .btn-primary', { timeout: 10000 }).catch(() => null);
-      if (authBtn) {
-        await authBtn.click();
-        console.log('  ✓ Clicked authorize button');
-        await this.page.waitForNavigation({ waitUntil: 'networkidle', timeout: 20000 }).catch(() => {});
-        await this.page.waitForTimeout(5000);
-        await this.page.screenshot({ path: 'screenshot-after-auth.png', fullPage: true });
-        console.log('  ✓ Captured screenshot-after-auth.png');
+      // Handle any post-login modals (Agree, Authorize, etc.)
+      const agreeBtn = await this.page.$('button:has-text("Agree"), button:has-text("Authorize"), .miui-modal-wrap .btn-primary');
+      if (agreeBtn) {
+        await agreeBtn.click({ force: true }).catch(() => {});
+        console.log('  ✓ Clicked Agree/Authorize button');
+        await this.page.waitForTimeout(3000);
       }
+      
+      // Check if still on login page
+      const stillLogin = this.page.url().includes('account.xiaomi.com') || this.page.url().includes('login');
+      if (stillLogin) {
+        console.log('  ! Still on login page after sign-in attempt');
+        await this.page.screenshot({ path: 'screenshot-login-stuck.png' });
+      } else {
+        console.log('  ✓ Successfully signed in');
+      }
+      return;
+    }
+    
+    // If not a sign-in form, look for authorize/agree buttons
+    const agreeBtn = await this.page.$('.miui-modal-wrap button:has-text("Agree"), button:has-text("Agree"), .miui-modal-wrap .btn-primary');
+    if (agreeBtn) {
+      console.log('  Found Agreement modal, clicking Agree...');
+      await agreeBtn.click({ force: true });
+      await this.page.waitForTimeout(3000);
+    }
+    
+    const authBtn = await this.page.$('button:has-text("Authorize"), button:has-text("Accept"), #accept, .btn-primary');
+    if (authBtn) {
+      await authBtn.click({ force: true });
+      console.log('  ✓ Clicked authorize button');
+      try {
+        await this.page.waitForNavigation({ waitUntil: 'networkidle', timeout: 15000 });
+      } catch (e) {}
+      await this.page.waitForTimeout(3000);
     }
   }
 

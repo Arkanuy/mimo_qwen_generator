@@ -75,39 +75,68 @@ export async function humanType(pageOrFrame, text, options = {}) {
 }
 
 /**
- * Fokus ke field, bersihkan isi lama secara natural, lalu ketik nilai baru
- * karakter-per-karakter. Pengganti drop-in untuk .fill() yang lebih meyakinkan.
+ * Set value via React-compatible native setter + dispatch events.
+ * React controlled inputs use Object.getOwnPropertyDescriptor to hijack
+ * the value setter — we need to call the NATIVE setter to bypass that,
+ * then dispatch 'input' + 'change' events so React picks up the change.
+ */
+async function reactSetValue(el, value) {
+  await el.evaluate((node, val) => {
+    const nativeSetter = Object.getOwnPropertyDescriptor(
+      window.HTMLInputElement.prototype, 'value'
+    ).set;
+    nativeSetter.call(node, val);
+    node.dispatchEvent(new Event('input', { bubbles: true }));
+    node.dispatchEvent(new Event('change', { bubbles: true }));
+  }, value);
+}
+
+/**
+ * Fokus ke field, bersihkan isi lama secara natural, lalu ketik nilai baru.
+ * Menggunakan native setter untuk React compatibility + keyboard.type
+ * untuk event keystroke yang natural.
  *
  * options:
  *   - clear:  'select-all' (default) atau 'backspace' atau 'none'
  *   - clickFirst: true (default) — klik field dulu sebelum ngetik
+ *   - reactMode: 'native' (default) — pakai native setter + dispatch
+ *                'keyboard' — keyboard.type murni (lama, bisa fail di React)
  */
 export async function humanFill(pageOrFrame, target, value, options = {}) {
   const el = await resolveTarget(pageOrFrame, target);
-  const clearMode = options.clear ?? 'select-all';
 
+  // Click to focus the field
   if (options.clickFirst !== false) {
     try { await el.hover({ timeout: 3000 }); } catch (e) {}
     await humanDelay(80, 200);
     try {
       await el.click({ delay: randInt(40, 120) });
     } catch (e) {
-      // beberapa input ke-overlay; coba focus saja
       try { await el.focus(); } catch (e2) {}
     }
   } else {
     try { await el.focus(); } catch (e) {}
   }
-
   await humanDelay(80, 200);
 
-  // Bersihkan isi lama
+  // STRATEGY 1: Playwright .fill() — paling reliable untuk React/Ant Design
+  // Properly handles controlled inputs, dispatches correct events
+  try {
+    await el.fill(value);
+    await humanDelay(100, 200);
+    const actual = await el.evaluate(n => n.value).catch(() => '');
+    if (actual === value) return;
+  } catch (e) {
+    // .fill() failed, try next strategy
+  }
+
+  // STRATEGY 2: Native setter (for inputs that reject .fill())
+  const clearMode = options.clear ?? 'select-all';
   if (clearMode === 'select-all') {
     await pageOrFrame.keyboard.press('Control+A');
     await humanDelay(40, 100);
     await pageOrFrame.keyboard.press('Backspace');
   } else if (clearMode === 'backspace') {
-    // Hapus per karakter, max 100 (jaga-jaga)
     for (let i = 0; i < 100; i++) {
       const v = await el.evaluate((node) => node.value || '').catch(() => '');
       if (!v) break;
@@ -115,10 +144,17 @@ export async function humanFill(pageOrFrame, target, value, options = {}) {
       await humanDelay(20, 60);
     }
   }
-
   await humanDelay(60, 160);
+
+  await reactSetValue(el, value);
+  await humanDelay(100, 200);
+  const actual2 = await el.evaluate(n => n.value).catch(() => '');
+  if (actual2 === value) return;
+
+  // STRATEGY 3: Keyboard typing as last resort
+  await el.evaluate(n => { n.value = ''; n.focus(); });
+  await humanDelay(40, 80);
   await humanType(pageOrFrame, String(value), options);
-  await humanDelay(80, 200);
 }
 
 /**
@@ -140,6 +176,12 @@ export async function humanFillLocator(page, locator, value, options = {}) {
   await page.keyboard.press('Backspace');
   await humanDelay(60, 160);
 
-  await humanType(page, String(value), options);
+  // Native setter for React compatibility
+  const handle = await locator.elementHandle();
+  if (handle) {
+    await reactSetValue(handle, value);
+  } else {
+    await humanType(page, String(value), options);
+  }
   await humanDelay(80, 200);
 }

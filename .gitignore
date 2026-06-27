@@ -1,11 +1,28 @@
+# Dependencies
 node_modules/
-output/*.txt
-output/*.log
-output/*.json
-*.png
-screenshot-*.png
-error-*.png
-chain-refcode-leak-*.png
-config/default.json
-/tmp/
-releases/
+web/node_modules/
+web/.next/
+
+# Output & DB (runtime data)
+output/
+db/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Env
+.env
+.env.local
+
+# Python
+__pycache__/
+*.pyc
+
+# Panic logs
+next-panic-*.log

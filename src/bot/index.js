@@ -1,12 +1,6 @@
 #!/usr/bin/env node
 /**
- * MiMo Chain Bot — Telegram admin bot.
- *
- * Run:
- *   node src/bot/index.js
- *
- * Manage Xiaomi MiMo automation via Telegram inline keyboard UI.
- * Admin-only: hanya user ID yang di-whitelist di config yang bisa akses.
+ * MiMo Register Bot — Telegram admin bot.
  */
 
 import { Telegraf } from 'telegraf';
@@ -17,7 +11,7 @@ import { ProxyManager } from '../browser/proxy.js';
 import { ChainRunner } from '../runner/chain-runner.js';
 import { adminOnly } from './admin.js';
 import {
-  startCommand, chainCommand, chainStartAction, stopCommand, stopConfirmAction, setRunner,
+  startCommand, registerCommand, registerStartAction, stopCommand, stopConfirmAction, setRunner,
 } from './commands/chain.js';
 import {
   proxyMenuCommand, proxyListAction, proxyAddAction, proxyDelMenuAction, proxyDelAction,
@@ -25,7 +19,7 @@ import {
 } from './commands/proxy.js';
 import {
   configShowCommand, configEditRefAction, configEditPassAction, configEditApiKeyAction,
-  configToggleProxyAction, configToggleHeadlessAction, handleConfigText, setConfig,
+  configToggleProviderAction, configToggleProxyAction, configToggleHeadlessAction, handleConfigText, setConfig,
 } from './commands/config.js';
 import { exportCommand, setOutputDir } from './commands/export.js';
 import { mainMenu } from './ui/keyboard.js';
@@ -58,7 +52,6 @@ const proxyManager = proxyConfig.enabled && proxyConfig.proxyList?.length > 0
 
 const runner = new ChainRunner(config, proxyManager, outputDir);
 
-// Set global references di command modules
 setRunner(runner);
 setProxyManager(proxyManager, configPath);
 setConfig(config, configPath);
@@ -73,23 +66,32 @@ if (!token || token === 'YOUR_BOT_TOKEN') {
 }
 
 const bot = new Telegraf(token);
-
-// Admin middleware
 bot.use(adminOnly(config));
+
+// ---- Register bot commands (menu list) ---------------------------------
+
+bot.telegram.setMyCommands([
+  { command: 'start', description: '🏠 Main menu' },
+  { command: 'register', description: '🚀 Start registration' },
+  { command: 'stop', description: '⏹ Stop running process' },
+  { command: 'export', description: '📤 Download results' },
+  { command: 'config', description: '⚙ Settings' },
+  { command: 'proxies', description: '🔌 Manage proxies' },
+]).catch(() => {});
 
 // ---- Commands ----------------------------------------------------------
 
 bot.command('start', startCommand);
-bot.command('chain', chainCommand);
+bot.command('register', registerCommand);
 bot.command('stop', stopCommand);
 bot.command('proxies', proxyMenuCommand);
 bot.command('export', exportCommand);
 bot.command('config', configShowCommand);
 
-// ---- Inline actions: Chain ---------------------------------------------
+// ---- Inline actions: Registration --------------------------------------
 
-bot.action(/^chain_menu$/, chainCommand);
-bot.action(/^chain_(\d+)$/, chainStartAction);
+bot.action(/^reg_menu$/, registerCommand);
+bot.action(/^reg_(\d+)$/, registerStartAction);
 bot.action(/^stop_btn$/, stopCommand);
 bot.action(/^stop_confirm$/, stopConfirmAction);
 
@@ -110,6 +112,7 @@ bot.action(/^config_edit_pass$/, configEditPassAction);
 bot.action(/^config_edit_apikey$/, configEditApiKeyAction);
 bot.action(/^config_toggle_proxy$/, (ctx) => configToggleProxyAction(ctx, proxyManager));
 bot.action(/^config_toggle_headless$/, configToggleHeadlessAction);
+bot.action(/^config_toggle_provider$/, configToggleProviderAction);
 
 // ---- Inline actions: Export --------------------------------------------
 
@@ -118,39 +121,45 @@ bot.action(/^export_btn$/, exportCommand);
 // ---- Inline actions: Navigation ----------------------------------------
 
 bot.action('menu', startCommand);
-bot.action('proxy_nop', (ctx) => ctx.answerCbQuery());  // informational buttons
+bot.action('proxy_nop', (ctx) => ctx.answerCbQuery());
 
-// ---- Text message handler (proxy add + config edit) --------------------
+// ---- Text message handler ----------------------------------------------
 
 bot.on('text', async (ctx, next) => {
-  // Check if editing config
   const configHandled = await handleConfigText(ctx);
   if (configHandled) return;
 
-  // Check if adding proxy
-  if (proxyManager._waitingForProxy === ctx.chat.id) {
+  if (proxyManager?._waitingForProxy === ctx.chat.id) {
     delete proxyManager._waitingForProxy;
     await handleProxyText(ctx, config);
     return;
   }
 
-  // Fallback
   return next();
 });
 
 // ---- Launch ------------------------------------------------------------
 
+// Prevent crashes from unhandled Telegram API errors
+bot.catch((err, ctx) => {
+  console.error(`  [Bot Error] ${err.message}`);
+  ctx.reply("⚠️ An error occurred. Please try again.").catch(() => {});
+});
 bot.launch().then(() => {
-  console.log('🤖 MiMo Chain Bot started');
-  console.log(`   Config  : ${configPath}`);
-  console.log(`   Output  : ${outputDir}`);
-  console.log(`   Proxies : ${proxyManager ? proxyManager.count + ' in pool' : 'disabled'}`);
-  console.log(`   Admins  : ${(config.telegram?.adminIds || []).join(', ')}`);
+  console.log('');
+  console.log('  ╔══════════════════════════════════════╗');
+  console.log('  ║     🤖 MiMo Register Bot             ║');
+  console.log('  ╠══════════════════════════════════════╣');
+  console.log(`  ║  Config  : ${configPath.slice(-24).padEnd(24)} ║`);
+  console.log(`  ║  Output  : ${outputDir.slice(-24).padEnd(24)} ║`);
+  console.log(`  ║  Proxies : ${(proxyManager ? proxyManager.count + ' in pool' : 'disabled').padEnd(24)} ║`);
+  console.log(`  ║  Admins  : ${(config.telegram?.adminIds || []).join(', ').padEnd(24)} ║`);
+  console.log('  ╚══════════════════════════════════════╝');
+  console.log('');
 });
 
-// Graceful shutdown
 process.once('SIGINT', () => {
-  console.log('\nShutting down...');
+  console.log('\n  ⏹ Shutting down...');
   if (runner.running) runner.stop();
   bot.stop('SIGINT');
 });

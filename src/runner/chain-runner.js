@@ -12,7 +12,7 @@
 
 import { EventEmitter } from 'events';
 import { chromium } from 'playwright';
-import { appendFileSync, existsSync } from 'fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { MimoRegistration } from '../core/registration.js';
 import { generateFingerprint, buildInitScript, buildExtraHeaders } from '../browser/fingerprint.js';
@@ -29,6 +29,8 @@ class ChainRunner extends EventEmitter {
     this.failLog = join(this.outputDir, 'chain-fail.log');
     this._aborted = false;
     this._running = false;
+    this._sessionResults = []; // Track results for current session only
+    this._sessionJsonFile = join(this.outputDir, 'results.json');
   }
 
   get running() { return this._running; }
@@ -155,23 +157,33 @@ class ChainRunner extends EventEmitter {
       await reg.handleImageCaptcha();
       await reg.verifyEmail(email);
 
-      try { await reg.redeemInviteCode(); } catch (e) {
-        if (e.code === 'ACCOUNT_RESTRICTED' || e.code === 'BALANCE_NOT_CREDITED') throw e;
-      }
+      // Skip invite code redemption (risk control issues)
+      console.log('  ⏭ Skipping invite code redemption');
 
       try { apiKey = await reg.createApiKey(); } catch (e) {}
       try { await reg.fillUltraspeedForm(email); } catch (e) {}
 
+      // Skip getReferralCode — not needed, wastes time navigating balance page
+      console.log('  ⏭ Skipping referral code scan');
+
+      // Extract cookies
+      let passToken = null, cUserId = null, userId = null;
       try {
-        const captured = await reg.getReferralCode();
-        if (captured && captured.toUpperCase() === currentRef.toUpperCase()) {
-          refCode = null;
-        } else {
-          refCode = captured;
-        }
+        const cookies = await reg.page.context().cookies();
+        passToken = cookies.find(c => c.name === 'passToken')?.value || null;
+        cUserId = cookies.find(c => c.name === 'cUserId')?.value || null;
+        userId = cookies.find(c => c.name === 'userId')?.value || null;
       } catch (e) {}
 
-      this._saveResult({ email, password: iterConfig.xiaomi.password, refCode, apiKey, invitedBy: currentRef });
+      this._saveResult({
+        email,
+        password: iterConfig.xiaomi.password,
+        apiKey,
+        passToken,
+        cUserId,
+        userId,
+        ultraspeed: true,
+      });
 
       const result = { ok: true, idx, total, email, refCode, apiKey };
       this.emit('progress', result);
@@ -183,6 +195,7 @@ class ChainRunner extends EventEmitter {
       }
 
       this._logFailed(email, err.message);
+      this._saveResult({ email, password: iterConfig.xiaomi.password, error: err.message });
 
       const result = {
         ok: false, idx, total, email, error: err.message,
@@ -197,11 +210,29 @@ class ChainRunner extends EventEmitter {
   }
 
   _saveResult(row) {
-    const line = [row.email, row.password, row.refCode || '', row.apiKey || '', row.invitedBy || ''].join(':') + '\n';
-    if (!existsSync(this.outputFile)) {
-      appendFileSync(this.outputFile, '# Chain loop results. Format: email:password:refCode:apiKey:invitedBy\n', 'utf8');
+    // 1. Append API key to .txt (one per line)
+    if (row.apiKey) {
+      appendFileSync(this.outputFile, row.apiKey + '\n', 'utf8');
     }
-    appendFileSync(this.outputFile, line, 'utf8');
+
+    // 2. Build JSON entry
+    const entry = {
+      email: row.email,
+      password: row.password,
+      cookies: {
+        passToken: row.passToken || null,
+        cUserId: row.cUserId || null,
+        userId: row.userId || null,
+      },
+      created_at: new Date().toISOString(),
+      status: row.apiKey ? 'success' : 'failed',
+      ultraspeed: row.ultraspeed || false,
+      error: row.error || null,
+    };
+    this._sessionResults.push(entry);
+
+    // 3. Write session results to JSON (overwrite each time — only current session)
+    writeFileSync(this._sessionJsonFile, JSON.stringify(this._sessionResults, null, 2), 'utf8');
   }
 
   _logFailed(email, error) {

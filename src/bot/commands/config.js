@@ -22,10 +22,13 @@ function configShowCommand(ctx) {
   const x = config.xiaomi;
   const c = config.captcha;
   const t = config.tempmail;
+  const provider = c.provider || '2captcha';
+  const providerLabel = provider === 'capmonster' ? 'CapMonster' : '2Captcha';
   return cleanReply(ctx,
     `⚙ *Configuration*\n\n` +
     `📧 *Tempmail*: \`${t.apiUrl}\`\n` +
-    `🔑 *2Captcha*: ...\`${(c.apiKey || '').slice(-6)}\`\n` +
+    `🤖 *Captcha Provider*: \`${providerLabel}\`\n` +
+    `🔑 *API Key*: ...\`${(c.apiKey || '').slice(-6)}\`\n` +
     `🔗 *Ref Code*: \`${x.inviteCode}\`\n` +
     `🔐 *Password*: \`${'*'.repeat(x.password.length)}\`\n` +
     `🖥 *Headless*: ${config.browser.headless ? '✅ on' : '❌ off'}\n` +
@@ -47,8 +50,24 @@ async function configEditPassAction(ctx) {
 }
 
 async function configEditApiKeyAction(ctx) {
-  await cleanReply(ctx, '✏ *Edit 2Captcha API Key*\n\nKirim API key baru:', configBack());
+  await cleanReply(ctx, '✏ *Edit API Key*\n\nKirim API key baru:', configBack());
   config._editing = { chatId: ctx.chat.id, field: 'apikey' };
+}
+
+// ---- Toggle captcha provider -----------------------------------------
+
+async function configToggleProviderAction(ctx) {
+  const current = config.captcha.provider || '2captcha';
+  config.captcha.provider = current === '2captcha' ? 'capmonster' : '2captcha';
+  _save();
+
+  const label = config.captcha.provider === 'capmonster' ? 'CapMonster' : '2Captcha';
+  await ctx.answerCbQuery(`Provider: ${label}`);
+  await cleanReply(ctx,
+    `🤖 *Captcha Provider:* \`${label}\`\n\n` +
+    `Pastikan API key sesuai dengan provider yang dipilih!`,
+    configMenu(config)
+  );
 }
 
 // ---- Handle text input for config edits -------------------------------
@@ -120,4 +139,4 @@ async function configToggleHeadlessAction(ctx) {
   await cleanReply(ctx, `🖥 *Headless:* ${status}`, configMenu(config));
 }
 
-export { setConfig, configShowCommand, configEditRefAction, configEditPassAction, configEditApiKeyAction, configToggleProxyAction, configToggleHeadlessAction, handleConfigText };
+export { setConfig, configShowCommand, configEditRefAction, configEditPassAction, configEditApiKeyAction, configToggleProviderAction, configToggleProxyAction, configToggleHeadlessAction, handleConfigText };

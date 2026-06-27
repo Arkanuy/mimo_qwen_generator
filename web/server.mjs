@@ -1,0 +1,633 @@
+/**
+ * Standalone API server for batch management.
+ * All data persisted to local JSON files.
+ * Admin requires login, public pages are open.
+ * Supports real parallel execution via threads config.
+ */
+import http from "http";
+import { readFileSync, existsSync, mkdirSync, writeFileSync, appendFileSync } from "fs";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
+import crypto from "crypto";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+
+// ── Paths ────────────────────────────────────────────────
+const DB_DIR = join(__dirname, "..", "db");
+const DB_FILE = join(DB_DIR, "batches.json");
+const OUTPUT_DIR = join(__dirname, "..", "output");
+
+mkdirSync(DB_DIR, { recursive: true });
+mkdirSync(OUTPUT_DIR, { recursive: true });
+
+// ── JSON Database ────────────────────────────────────────
+function loadDB() {
+  if (!existsSync(DB_FILE)) return {};
+  try {
+    return JSON.parse(readFileSync(DB_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+
+function saveDB(data) {
+  writeFileSync(DB_FILE, JSON.stringify(data, null, 2), "utf8");
+}
+
+// Load on startup
+const db = loadDB();
+
+// ── Auth Config ──────────────────────────────────────────
+const ADMIN_USER = process.env.ADMIN_USER || "admin";
+const ADMIN_PASS = process.env.ADMIN_PASS || "mimo2024";
+
+const sessions = new Map();
+
+function createSession(role) {
+  const token = crypto.randomBytes(32).toString("hex");
+  sessions.set(token, { role, created: Date.now() });
+  return token;
+}
+
+function getSession(token) {
+  const s = sessions.get(token);
+  if (!s) return null;
+  if (Date.now() - s.created > 86400000) { sessions.delete(token); return null; }
+  return s;
+}
+
+function parseCookies(header) {
+  const cookies = {};
+  if (!header) return cookies;
+  header.split(";").forEach(c => { const [k, ...v] = c.trim().split("="); cookies[k] = v.join("="); });
+  return cookies;
+}
+
+function getAuth(req) {
+  const cookies = parseCookies(req.headers.cookie);
+  const token = cookies["session_token"];
+  if (!token) return null;
+  return getSession(token);
+}
+
+function isAdmin(req) {
+  return getAuth(req)?.role === "admin";
+}
+
+function setCors(req, res) {
+  const origin = req.headers.origin || "*";
+  res.setHeader("Access-Control-Allow-Origin", origin);
+  res.setHeader("Access-Control-Allow-Credentials", "true");
+}
+
+// ── Batch helpers ────────────────────────────────────────
+const logListeners = new Map();
+
+function getBatch(id) { return db[id] || null; }
+
+function getAllBatches() {
+  return Object.values(db).sort((a, b) => (b.startedAt || b.id).localeCompare(a.startedAt || a.id));
+}
+
+function persistBatch(batch) {
+  db[batch.id] = batch;
+  saveDB(db);
+}
+
+function createBatch(config) {
+  const id = `batch-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  const batch = {
+    id, config, status: "idle", generator: config.generator || "mimo",
+    progress: { current: 0, total: config.count, success: 0, failed: 0 },
+    results: [], logs: [], startedAt: null, completedAt: null,
+  };
+  persistBatch(batch);
+
+  // Per-batch output dir
+  const batchDir = join(OUTPUT_DIR, id);
+  mkdirSync(batchDir, { recursive: true });
+  writeFileSync(join(batchDir, "apiKey.txt"), "", "utf8");
+  writeFileSync(join(batchDir, "results.json"), "[]", "utf8");
+
+  return batch;
+}
+
+function addLog(batchId, message) {
+  const batch = db[batchId];
+  if (!batch) return;
+  const ts = new Date().toLocaleTimeString("en-US", { hour12: false });
+  const line = `[${ts}] ${message}`;
+  batch.logs.push(line);
+  if (batch.logs.length > 2000) batch.logs.shift();
+
+  // Persist every 5 logs to reduce disk writes
+  if (batch.logs.length % 5 === 0) saveDB(db);
+
+  const batchDir = join(OUTPUT_DIR, batchId);
+  if (existsSync(batchDir)) appendFileSync(join(batchDir, "batch.log"), line + "\n", "utf8");
+
+  const listeners = logListeners.get(batchId);
+  if (listeners) listeners.forEach(fn => fn(line, batch));
+}
+
+function setStatus(batchId, status) {
+  const batch = db[batchId];
+  if (!batch) return;
+  batch.status = status;
+  if (status === "running" && !batch.startedAt) batch.startedAt = new Date().toISOString();
+  if (["completed", "stopped", "error"].includes(status)) batch.completedAt = new Date().toISOString();
+  saveDB(db);
+}
+
+function saveBatchResult(batchId, row) {
+  const batch = db[batchId];
+  if (!batch) return;
+  const batchDir = join(OUTPUT_DIR, batchId);
+
+  if (row.apiKey && existsSync(batchDir)) {
+    appendFileSync(join(batchDir, "apiKey.txt"), row.apiKey + "\n", "utf8");
+  }
+
+  const entry = {
+    email: row.email, password: row.password,
+    cookies: { passToken: row.passToken || null, cUserId: row.cUserId || null, userId: row.userId || null },
+    apiKey: row.apiKey || null, created_at: new Date().toISOString(),
+    status: row.apiKey ? "success" : "failed", ultraspeed: row.ultraspeed || false, error: row.error || null,
+  };
+  batch.results.push(entry);
+
+  // Save per-batch results.json
+  if (existsSync(batchDir)) {
+    writeFileSync(join(batchDir, "results.json"), JSON.stringify(batch.results.map(r => ({
+      email: r.email, password: r.password, cookies: r.cookies, created_at: r.created_at,
+      status: r.status, ultraspeed: r.ultraspeed, error: r.error,
+    })), null, 2), "utf8");
+  }
+
+  // Persist to main db
+  saveDB(db);
+}
+
+// ── Sanitize for public ──────────────────────────────────
+function sanitizeBatch(batch) {
+  return {
+    id: batch.id,
+    config: { count: batch.config.count, headless: batch.config.headless, threads: batch.config.threads, seedCode: batch.config.seedCode },
+    status: batch.status, progress: batch.progress,
+    results: batch.results.map(r => ({
+      email: r.email || "—",
+      status: r.status, error: r.error, created_at: r.created_at, ultraspeed: r.ultraspeed,
+    })),
+    logs: batch.logs,
+    startedAt: batch.startedAt, completedAt: batch.completedAt,
+  };
+}
+
+// ── Registration Runner (PARALLEL) ───────────────────────
+async function runBatch(batchId, config) {
+  if (config.generator === "qwencloud") return runQwenBatch(batchId, config);
+  return runMimoBatch(batchId, config);
+}
+
+async function runMimoBatch(batchId, config) {
+  const { MimoRegistration } = await import("../src/core/registration.js");
+  const { generateFingerprint, buildInitScript, buildExtraHeaders } = await import("../src/browser/fingerprint.js");
+  const { chromium } = await import("playwright");
+
+  const threadCount = Math.min(config.threads || 1, config.count);
+  let currentRef = config.seedCode;
+  let nextIdx = 0;
+  let activeCount = 0;
+  let stopped = false;
+
+  addLog(batchId, `🚀 Launching ${threadCount} parallel thread(s) for ${config.count} accounts...`);
+
+  async function runAccount(idx, total, ref, threadId) {
+    const batch = db[batchId];
+    if (!batch || batch.status === "stopped") return { ok: false };
+
+    const tag = `[T${threadId}]`;
+    addLog(batchId, `${tag} Account ${idx + 1}/${total} starting...`);
+    batch.progress.current = Math.max(batch.progress.current, idx + 1);
+
+    const iterConfig = {
+      tempmail: { apiUrl: config.tempmailUrl },
+      captcha: { provider: config.captchaProvider, apiKey: config.captchaApiKey },
+      xiaomi: {
+        inviteCode: ref,
+        referralLink: `https://platform.xiaomimimo.com/?ref=${encodeURIComponent(ref)}`,
+        password: config.password, betaApplication: "MiMo-V2.5-Pro-UltraSpeed",
+      },
+      browser: { headless: config.headless, timeout: 60000, screenshots: false },
+      proxy: { enabled: false, rotatePerAccount: true, defaultCountry: "US", maxRetries: 3, proxyList: [] },
+    };
+
+    const reg = new MimoRegistration(iterConfig);
+    let email = null, apiKey = null, passToken = null, cUserId = null, userId = null;
+
+    try {
+      email = await reg.tempmail.createInbox();
+      addLog(batchId, `${tag} Email: ${email}`);
+      const fp = generateFingerprint();
+      addLog(batchId, `${tag} Chrome ${fp.chromeMajor}`);
+
+      reg.browser = await chromium.launch({
+        headless: config.headless, channel: "chrome",
+        args: [`--window-size=${fp.viewport.width},${fp.viewport.height}`, "--disable-blink-features=AutomationControlled"],
+      });
+      const ctx = await reg.browser.newContext({
+        userAgent: fp.userAgent, viewport: fp.viewport, deviceScaleFactor: fp.deviceScaleFactor,
+        locale: fp.locale, timezoneId: fp.timezone,
+        screen: { width: fp.screen.width, height: fp.screen.height },
+        extraHTTPHeaders: buildExtraHeaders(fp),
+      });
+      await ctx.addInitScript({ content: buildInitScript(fp) });
+      reg.page = await ctx.newPage();
+      const origSS = reg.page.screenshot.bind(reg.page);
+      reg.page.screenshot = async (opts = {}) => {
+        if (opts?.path?.includes("error")) return origSS(opts);
+        return Buffer.alloc(0);
+      };
+
+      addLog(batchId, `${tag} Navigating...`);
+      await reg.page.goto(iterConfig.xiaomi.referralLink, { waitUntil: "networkidle", timeout: 60000 });
+      addLog(batchId, `${tag} Filling form...`);
+      await reg.fillRegistrationForm(email);
+      addLog(batchId, `${tag} Submitting...`);
+      await reg.submitRegistration();
+      addLog(batchId, `${tag} Solving captcha...`);
+      await reg.handleXiaomiCaptcha();
+      await reg.handleImageCaptcha();
+      addLog(batchId, `${tag} Captcha solved ✓`);
+      addLog(batchId, `${tag} Verifying email...`);
+      await reg.verifyEmail(email);
+      addLog(batchId, `${tag} Email verified ✓`);
+      addLog(batchId, `${tag} Creating API key...`);
+      try { apiKey = await reg.createApiKey(); } catch (e) { addLog(batchId, `${tag} API key error: ${e.message}`); }
+      addLog(batchId, `${tag} Filling Ultraspeed...`);
+      try { await reg.fillUltraspeedForm(email); } catch (e) { addLog(batchId, `${tag} Ultraspeed error: ${e.message}`); }
+
+      try {
+        const cookies = await reg.page.context().cookies();
+        passToken = cookies.find(c => c.name === "passToken")?.value || null;
+        cUserId = cookies.find(c => c.name === "cUserId")?.value || null;
+        userId = cookies.find(c => c.name === "userId")?.value || null;
+      } catch {}
+
+      if (apiKey) {
+        addLog(batchId, `${tag} ✅ Account ${idx + 1} success — ${email}`);
+        batch.progress.success++;
+        saveBatchResult(batchId, { email, password: config.password, apiKey, passToken, cUserId, userId, ultraspeed: true });
+        return { ok: true };
+      } else {
+        addLog(batchId, `${tag} ❌ Account ${idx + 1} failed — no API key`);
+        batch.progress.failed++;
+        saveBatchResult(batchId, { email, password: config.password, ultraspeed: false, error: "No API key obtained" });
+        return { ok: false };
+      }
+    } catch (err) {
+      addLog(batchId, `${tag} ❌ Account ${idx + 1} error: ${err.message}`);
+      batch.progress.failed++;
+      saveBatchResult(batchId, { email, password: config.password, ultraspeed: false, error: err.message });
+      return { ok: false };
+    } finally {
+      if (reg.browser) await reg.browser.close().catch(() => {});
+    }
+  }
+
+  return new Promise((resolve) => {
+    function launchNext() {
+      while (activeCount < threadCount && nextIdx < config.count && !stopped) {
+        const idx = nextIdx++;
+        const threadId = (idx % threadCount) + 1;
+        activeCount++;
+
+        runAccount(idx, config.count, currentRef, threadId).finally(() => {
+          activeCount--;
+          const b = db[batchId];
+          if (!b || b.status === "stopped") stopped = true;
+
+          if (nextIdx >= config.count && activeCount === 0) {
+            const b = db[batchId];
+            if (b && b.status === "running") {
+              setStatus(batchId, "completed");
+              addLog(batchId, `Done — ${b.progress.success} success, ${b.progress.failed} failed`);
+            }
+            resolve();
+          } else if (!stopped) {
+            setTimeout(launchNext, 500);
+          } else if (activeCount === 0) {
+            const b = db[batchId];
+            if (b && b.status === "running") {
+              setStatus(batchId, "stopped");
+              addLog(batchId, `Stopped — ${b.progress.success} success, ${b.progress.failed} failed`);
+            }
+            resolve();
+          }
+        });
+      }
+    }
+    launchNext();
+  });
+}
+
+
+// ── QwenCloud Registration Runner (PARALLEL) ─────────────
+async function runQwenBatch(batchId, config) {
+  const { QwenRegistration } = await import('../src/core/qwen-registration.js');
+
+  const threadCount = Math.min(config.threads || 1, config.count);
+  let nextIdx = 0;
+  let activeCount = 0;
+  let stopped = false;
+
+  addLog(batchId, `🚀 Launching ${threadCount} parallel thread(s) for ${config.count} QwenCloud accounts...`);
+
+  async function runAccount(idx, total, threadId) {
+    const batch = db[batchId];
+    if (!batch || batch.status === 'stopped') return { ok: false };
+
+    const tag = `[T${threadId}]`;
+    addLog(batchId, `${tag} Account ${idx+1}/${total} starting...`);
+    batch.progress.current = Math.max(batch.progress.current, idx + 1);
+
+    const qwenConfig = {
+      browser: { headless: config.headless, timeout: 60000 },
+      tempmail: { apiUrl: config.tempmailUrl || 'https://tempik.hindiabelanda.my.id/api' },
+    };
+
+    const reg = new QwenRegistration(qwenConfig);
+    reg.on('log', msg => addLog(batchId, `${tag} ${msg}`));
+
+    try {
+      // QwenRegistration handles tempmail internally (session → inbox → poll)
+      const result = await reg.run({ email: null, country: config.country || '', apiKeyDesc: 'default' });
+
+      const rEmail = result.email || 'unknown';
+      if (result.status === 'success' && result.apiKey) {
+        addLog(batchId, `${tag} ✅ Account ${idx+1} success — ${rEmail}`);
+        batch.progress.success++;
+        saveBatchResult(batchId, {
+          email: rEmail, password: '',
+          apiKey: result.apiKey,
+          ultraspeed: false,
+          extra: { baseUrlOpenai: result.baseUrlOpenai, baseUrlAnthropic: result.baseUrlAnthropic, country: result.country },
+        });
+        return { ok: true };
+      } else if (result.status === 'success-no-key') {
+        addLog(batchId, `${tag} ⚠ Account ${idx+1} registered but no API key — ${rEmail}`);
+        batch.progress.failed++;
+        saveBatchResult(batchId, { email: rEmail, password: '', ultraspeed: false, error: 'No API key obtained' });
+        return { ok: false };
+      } else {
+        addLog(batchId, `${tag} ❌ Account ${idx+1} failed: ${result.reason || result.status}`);
+        batch.progress.failed++;
+        saveBatchResult(batchId, { email: rEmail, password: '', ultraspeed: false, error: result.reason || result.status });
+        return { ok: false };
+      }
+    } catch (err) {
+      addLog(batchId, `${tag} ❌ Account ${idx+1} error: ${err.message}`);
+      batch.progress.failed++;
+      saveBatchResult(batchId, { email: 'unknown', password: '', ultraspeed: false, error: err.message });
+      return { ok: false };
+    }
+  }
+
+  return new Promise((resolve) => {
+    function launchNext() {
+      while (activeCount < threadCount && nextIdx < config.count && !stopped) {
+        const idx = nextIdx++;
+        const threadId = (idx % threadCount) + 1;
+        activeCount++;
+
+        runAccount(idx, config.count, threadId).finally(() => {
+          activeCount--;
+          const b = db[batchId];
+          if (!b || b.status === 'stopped') stopped = true;
+
+          if (nextIdx >= config.count && activeCount === 0) {
+            const b = db[batchId];
+            if (b && b.status === 'running') {
+              setStatus(batchId, 'completed');
+              addLog(batchId, `Done — ${b.progress.success} success, ${b.progress.failed} failed`);
+            }
+            resolve();
+          } else if (!stopped) {
+            setTimeout(launchNext, 500);
+          } else if (activeCount === 0) {
+            const b = db[batchId];
+            if (b && b.status === 'running') {
+              setStatus(batchId, 'stopped');
+              addLog(batchId, `Stopped — ${b.progress.success} success, ${b.progress.failed} failed`);
+            }
+            resolve();
+          }
+        });
+      }
+    }
+    launchNext();
+  });
+}
+
+// ── HTTP Server ──────────────────────────────────────────
+function parseBody(req) {
+  return new Promise((resolve) => {
+    let body = "";
+    req.on("data", c => body += c);
+    req.on("end", () => { try { resolve(JSON.parse(body)); } catch { resolve({}); } });
+  });
+}
+
+function sendJSON(req, res, data, status = 200) {
+  setCors(req, res);
+  res.writeHead(status, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(data));
+}
+
+const server = http.createServer(async (req, res) => {
+  if (req.method === "OPTIONS") {
+    const origin = req.headers.origin || "*";
+    res.writeHead(204, {
+      "Access-Control-Allow-Origin": origin,
+      "Access-Control-Allow-Methods": "GET,POST,PATCH,DELETE,OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Credentials": "true",
+    });
+    return res.end();
+  }
+
+  const url = new URL(req.url, `http://${req.headers.host}`);
+
+  // ── Auth ──────────────────────────────────────────────
+
+  if (req.method === "POST" && url.pathname === "/api/login") {
+    const { username, password } = await parseBody(req);
+    if (username === ADMIN_USER && password === ADMIN_PASS) {
+      const token = createSession("admin");
+      setCors(req, res);
+      res.setHeader("Set-Cookie", `session_token=${token}; Path=/; HttpOnly; SameSite=Lax; Max-Age=86400`);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ ok: true, role: "admin" }));
+    }
+    return sendJSON(req, res, { ok: false, error: "Invalid credentials" }, 401);
+  }
+
+  if (req.method === "POST" && url.pathname === "/api/logout") {
+    const cookies = parseCookies(req.headers.cookie);
+    if (cookies.session_token) sessions.delete(cookies.session_token);
+    setCors(req, res);
+    res.setHeader("Set-Cookie", "session_token=; Path=/; HttpOnly; Max-Age=0");
+    res.writeHead(200, { "Content-Type": "application/json" });
+    return res.end(JSON.stringify({ ok: true }));
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/me") {
+    const auth = getAuth(req);
+    if (!auth) return sendJSON(req, res, { ok: false, role: "guest" });
+    return sendJSON(req, res, { ok: true, role: auth.role });
+  }
+
+  // ── Public ────────────────────────────────────────────
+
+  if (req.method === "GET" && url.pathname === "/api/batch") {
+    const all = getAllBatches();
+    if (isAdmin(req)) return sendJSON(req, res, all);
+    return sendJSON(req, res, all.map(sanitizeBatch));
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/logs") {
+    const id = url.searchParams.get("id");
+    if (!id || !db[id]) { setCors(req, res); res.writeHead(404); return res.end("Not found"); }
+
+    const admin = isAdmin(req);
+    setCors(req, res);
+    res.writeHead(200, { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", "Connection": "keep-alive" });
+
+    const batch = db[id];
+    const sendBatch = admin ? batch : sanitizeBatch(batch);
+    for (const log of sendBatch.logs) {
+      res.write(`data: ${JSON.stringify({ log, batch: sendBatch })}\n\n`);
+    }
+
+    const listener = (log, b) => {
+      try {
+        const sendB = admin ? b : sanitizeBatch(b);
+        const sendLog = log;
+        res.write(`data: ${JSON.stringify({ log: sendLog, batch: sendB })}\n\n`);
+      } catch {}
+    };
+    if (!logListeners.has(id)) logListeners.set(id, new Set());
+    logListeners.get(id).add(listener);
+
+    const interval = setInterval(() => {
+      try {
+        const b = db[id];
+        const sendB = admin ? b : sanitizeBatch(b);
+        res.write(`data: ${JSON.stringify({ heartbeat: true, batch: sendB })}\n\n`);
+      } catch { clearInterval(interval); }
+    }, 15000);
+
+    req.on("close", () => { logListeners.get(id)?.delete(listener); clearInterval(interval); });
+    return;
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/stats") {
+    const all = Object.values(db);
+    return sendJSON(req, res, {
+      totalBatches: all.length,
+      running: all.filter(b => b.status === "running").length,
+      completed: all.filter(b => b.status === "completed").length,
+      totalSuccess: all.reduce((s, b) => s + b.progress.success, 0),
+      totalFailed: all.reduce((s, b) => s + b.progress.failed, 0),
+    });
+  }
+
+  // ── Admin-only ────────────────────────────────────────
+
+  if (req.method === "POST" && url.pathname === "/api/batch") {
+    if (!isAdmin(req)) return sendJSON(req, res, { error: "Unauthorized" }, 401);
+    const config = await parseBody(req);
+    const batch = createBatch(config);
+    setStatus(batch.id, "running");
+    addLog(batch.id, `Started — ${config.count} accounts, headless: ${config.headless}, threads: ${config.threads || 1}, generator: ${config.generator || "mimo"}`);
+    runBatch(batch.id, config).catch(err => {
+      addLog(batch.id, `Fatal: ${err.message}`);
+      setStatus(batch.id, "error");
+    });
+    return sendJSON(req, res, batch);
+  }
+
+  if (req.method === "PATCH" && url.pathname === "/api/batch") {
+    if (!isAdmin(req)) return sendJSON(req, res, { error: "Unauthorized" }, 401);
+    const { id, action } = await parseBody(req);
+    const batch = db[id];
+    if (!batch) return sendJSON(req, res, { error: "Not found" }, 404);
+    if (action === "stop") { setStatus(id, "stopped"); addLog(id, "Stopped by user"); }
+    return sendJSON(req, res, batch);
+  }
+
+  if (req.method === "DELETE" && url.pathname === "/api/batch") {
+    if (!isAdmin(req)) return sendJSON(req, res, { error: "Unauthorized" }, 401);
+    const { id } = await parseBody(req);
+    if (!db[id]) return sendJSON(req, res, { error: "Not found" }, 404);
+    delete db[id];
+    logListeners.delete(id);
+    saveDB(db);
+    return sendJSON(req, res, { ok: true });
+  }
+
+  if (req.method === "GET" && url.pathname === "/api/download") {
+    if (!isAdmin(req)) return sendJSON(req, res, { error: "Unauthorized" }, 401);
+    const id = url.searchParams.get("id");
+    const type = url.searchParams.get("type") || "json";
+    const batchDir = join(OUTPUT_DIR, id);
+
+    if (type === "txt") {
+      const fp = join(batchDir, "apiKey.txt");
+      if (existsSync(fp)) {
+        setCors(req, res);
+        res.writeHead(200, { "Content-Type": "text/plain", "Content-Disposition": `attachment; filename="${id}-apiKeys.txt"` });
+        return res.end(readFileSync(fp, "utf8"));
+      }
+    }
+    if (type === "json") {
+      const fp = join(batchDir, "results.json");
+      if (existsSync(fp)) {
+        setCors(req, res);
+        res.writeHead(200, { "Content-Type": "application/json", "Content-Disposition": `attachment; filename="${id}-results.json"` });
+        return res.end(readFileSync(fp, "utf8"));
+      }
+    }
+
+    // Fallback to in-memory
+    const batch = db[id];
+    if (!batch) return sendJSON(req, res, { error: "Not found" }, 404);
+    if (type === "txt") {
+      const content = batch.results.filter(r => r.apiKey).map(r => r.apiKey).join("\n") + "\n";
+      setCors(req, res);
+      res.writeHead(200, { "Content-Type": "text/plain", "Content-Disposition": `attachment; filename="api-keys.txt"` });
+      return res.end(content);
+    }
+    const json = JSON.stringify(batch.results.map(r => ({
+      email: r.email, password: r.password,
+      cookies: { passToken: r.passToken, cUserId: r.cUserId, userId: r.userId },
+      created_at: r.created_at, status: r.status, ultraspeed: r.ultraspeed, error: r.error,
+    })), null, 2);
+    setCors(req, res);
+    res.writeHead(200, { "Content-Type": "application/json", "Content-Disposition": `attachment; filename="results.json"` });
+    return res.end(json);
+  }
+
+  res.writeHead(404);
+  res.end("Not found");
+});
+
+const PORT = 3001;
+const batchCount = Object.keys(db).length;
+server.listen(PORT, () => {
+  console.log(`\n  🔷 MiMo API Server running on http://localhost:${PORT}`);
+  console.log(`  Admin login: ${ADMIN_USER} / ${ADMIN_PASS}`);
+  console.log(`  Database: ${DB_FILE}`);
+  console.log(`  Loaded ${batchCount} existing batch(es)\n`);
+});

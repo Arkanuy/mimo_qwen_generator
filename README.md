@@ -1,10 +1,10 @@
-# MiMo Chain Bot
+# MiMo & QwenCloud Auto-Registration
 
-> 🔷 Automated Xiaomi MiMo Open Platform registration + Telegram admin bot
+> 🔷 Automated account registration + API key harvester with web dashboard
 >
-> ✨ Chain-loop: register → redeem → API key → ultraspeed → capture ref code → repeat
+> ✨ Supports Xiaomi MiMo Open Platform & QwenCloud (Alibaba)
 >
-> 🎛 Telegram inline keyboard UI — control everything from your phone
+> 🖥️ Real-time web dashboard — batch management, thread monitoring, live terminal
 
 ---
 
@@ -12,54 +12,40 @@
 
 | Feature | Detail |
 |---|---|
-| 🔗 **Chain loop** | Auto-register accounts in chain — each new account uses previous ref code |
-| 🎭 **Random fingerprint** | Unique browser profile per account (UA, WebGL, canvas, locale, timezone, hardware) |
-| 🧩 **Smart captcha** | reCAPTCHA v2 + image captcha solving via 2Captcha |
+| 🌐 **Web Dashboard** | Real-time batch management with dark theme UI, login auth, public status page |
+| ⚡ **Multi-threading** | Parallel browser execution (1-20 threads), live per-thread status board |
+| 🔗 **Chain loop** | MiMo: auto-register in chain — each account uses previous ref code |
+| ☁️ **QwenCloud** | QwenCloud account registration + API key extraction (sk-...) |
+| 🎭 **Random fingerprint** | Unique browser profile per account (UA, WebGL, canvas, locale, timezone) |
+| 🧩 **Smart captcha** | reCAPTCHA v2 + image captcha solving via CapMonster / 2Captcha |
 | 🌐 **Multi-proxy** | Proxy pool with auto-rotation, health check, country-aware fingerprint |
-| 🤖 **Telegram bot** | Admin-only with inline keyboard, real-time progress, config editor |
-| 🧹 **Auto-clean chat** | Bot deletes previous messages for a clean UI |
-| 🔐 **Watermarked** | Brand preserved — cannot be removed without modifying source |
-| 📦 **Modular** | Clean structure: clients / core / browser / runner / bot |
+| 📧 **Tempmail** | Disposable email inbox per account — auto-create, auto-poll verification codes |
+| 📊 **Live Terminal** | macOS-style terminal with thread-grouped view, board view, raw log view |
+| 🔐 **Auth System** | Admin login (full access) + public status page (view-only) |
+| 💾 **Persistent DB** | All batch data saved to local JSON — survives server restarts |
+| 📥 **Per-batch download** | Download `apiKey.txt` and `results.json` per batch anytime |
 
 ---
 
-## 📦 Project Structure
+## 📸 Architecture
 
 ```
-mekithil/
-├── src/
-│   ├── clients/            # External API clients
-│   │   ├── tempmail.js     # Temporary email API client
-│   │   └── captcha.js      # 2Captcha solver
-│   ├── core/
-│   │   └── registration.js # MimoRegistration + getReferralCode
-│   ├── browser/
-│   │   ├── fingerprint.js  # Browser profile randomizer
-│   │   ├── human.js        # Human-like interaction
-│   │   └── proxy.js        # Proxy pool manager
-│   ├── runner/
-│   │   └── chain-runner.js # Event-based chain orchestrator
-│   ├── bot/
-│   │   ├── index.js        # Telegram bot entry point
-│   │   ├── admin.js        # Admin whitelist middleware
-│   │   ├── watermark.js    # Branding & integrity
-│   │   ├── commands/       # Command handlers
-│   │   │   ├── chain.js    # /chain /stop + live progress
-│   │   │   ├── proxy.js    # /proxies + add/delete
-│   │   │   ├── config.js   # /config + edit
-│   │   │   └── export.js   # /export
-│   │   └── ui/
-│   │       └── keyboard.js # Inline keyboard builders
-│   ├── config.js           # Config loader
-│   └── index.js            # Barrel export
-├── scripts/
-│   ├── chain-loop.js       # CLI entry point
-│   └── chain-loop-config.js
-├── config/
-│   └── default.json        # User configuration
-├── output/                 # Results directory
-├── package.json
-└── .gitignore
+┌──────────────┐     ┌──────────────────┐     ┌─────────────────────┐
+│  Web Browser  │────▶│  Next.js Frontend │────▶│  API Server (:3001) │
+│  (Dashboard)  │     │  (Port 3000)      │     │  (server.mjs)        │
+└──────────────┘     └──────────────────┘     └─────────┬───────────┘
+                                                        │
+                           ┌────────────────────────────┼────────────────────┐
+                           │                            │                    │
+                    ┌──────▼──────┐            ┌────────▼────────┐   ┌──────▼──────┐
+                    │  MiMo Reg   │            │  QwenCloud Reg  │   │  Tempmail   │
+                    │  (Node.js)  │            │  (Node.js)      │   │  API        │
+                    └─────────────┘            └─────────────────┘   └─────────────┘
+                           │                            │
+                    ┌──────▼──────┐            ┌────────▼────────┐
+                    │  Playwright │            │  Playwright     │
+                    │  Browser    │            │  Browser        │
+                    └─────────────┘            └─────────────────┘
 ```
 
 ---
@@ -68,231 +54,182 @@ mekithil/
 
 ### Prerequisites
 
-- **Node.js** ≥ 18
-- **Chrome / Chromium** installed
-- **2Captcha** account with balance
-- **Telegram Bot Token** from [@BotFather](https://t.me/BotFather)
+| Requirement | Install |
+|---|---|
+| Node.js 18+ | [nodejs.org](https://nodejs.org) |
+| Google Chrome | [google.com/chrome](https://google.com/chrome) |
+| Playwright | `npx playwright install chromium` |
 
-### Installation
+### 1. Clone & Install
 
 ```bash
-# 1. Clone repository
 git clone https://github.com/hirotomasato/mekithil.git
 cd mekithil
-
-# 2. Install dependencies
 npm install
-
-# 3. Install Playwright browsers
-npx playwright install chrome
-# Linux VPS only:
-npx playwright install-deps
-
-# 4. Configure
-cp config/default.json config/default.json
-nano config/default.json
+cd web && npm install && cd ..
 ```
 
-### Configuration
+### 2. Configure
 
 Edit `config/default.json`:
 
 ```json
 {
-  "tempmail": {
-    "apiUrl": "https://your-domain.com/api"
-  },
-  "captcha": {
-    "provider": "2captcha",
-    "apiKey": "YOUR_2CAPTCHA_KEY"
-  },
-  "xiaomi": {
-    "referralLink": "https://platform.xiaomimimo.com/?ref=YOURCODE",
-    "inviteCode": "YOURCODE",
-    "password": "YourPassword",
-    "betaApplication": "MiMo-V2.5-Pro-UltraSpeed"
-  },
-  "telegram": {
-    "botToken": "YOUR_BOT_TOKEN",
-    "adminIds": [YOUR_TELEGRAM_ID],
-    "logChatId": null
-  },
-  "browser": {
-    "headless": true,
-    "timeout": 60000,
-    "screenshots": false
-  },
-  "proxy": {
-    "enabled": false,
-    "rotatePerAccount": true,
-    "defaultCountry": "US",
-    "maxRetries": 3,
-    "proxyList": []
-  }
+  "tempmail": { "apiUrl": "https://your-tempmail-api.com/api" },
+  "captcha": { "provider": "capmonster", "apiKey": "YOUR_CAPTCHA_API_KEY" },
+  "xiaomi": { "inviteCode": "YOUR_SEED_CODE", "password": "YourPassword123!" },
+  "browser": { "headless": true, "timeout": 60000 }
 }
 ```
 
-**Required:**
-- `captcha.apiKey` — 2Captcha API key (needs balance)
-- `xiaomi.inviteCode` — Referral code for first account seed (6 chars)
-- `xiaomi.password` — Password for all accounts
-- `telegram.botToken` — Telegram bot token from @BotFather
-- `telegram.adminIds` — Your Telegram user ID (array of numbers)
-- `tempmail.apiUrl` — Your own temp mail API (**must deploy yourself — see below**)
+### 3. Start
 
-**Optional:**
-- `proxy.enabled` — Enable proxy rotation
-- `proxy.proxyList` — Array of proxy strings: `ip:port:user:pass`
-- `browser.headless` — `true` = no UI, `false` = visible browser
+**Terminal 1 — API Server:**
+```bash
+cd web
+node server.mjs
+```
 
-### ⚠️ Required: Deploy Your Own Tempmail API
+**Terminal 2 — Web Dashboard:**
+```bash
+cd web
+npm run dev
+```
 
-This bot does **not** include a temp email service. You must deploy your own:
+Open `http://localhost:3000` — login with `admin` / `mimo2024`
 
-📦 **[github.com/hirotomasato/tempik](https://github.com/hirotomasato/tempik)**
+Public status page: `http://localhost:3000/status` (no login needed)
 
-Self-hosted disposable email on **Cloudflare Workers** (free tier). Setup takes 5 minutes — no VPS needed.
+### 4. Environment Variables (optional)
 
 ```bash
-git clone https://github.com/hirotomasato/tempik
-cd tempik
-npm install
-npx wrangler deploy
-```
-
-Then point your config to your domain:
-
-```json
-"tempmail": {
-  "apiUrl": "https://mail.yourdomain.com/api"
-}
-```
-
-### Run
-
-```bash
-# Telegram Bot (recommended)
-npm run bot
-
-# CLI mode (direct terminal)
-npm run chain -- --count 5
-npm run chain -- --count 10 --seed XXXXXX --output results.txt
+ADMIN_USER=admin          # Admin username
+ADMIN_PASS=mimo2024       # Admin password
 ```
 
 ---
 
-## 🤖 Telegram Bot Commands
+## 🖥️ Web Dashboard
 
-| Command / Button | Action |
-|---|---|
-| `/start` | Main menu with status overview |
-| `▶ Run Chain` | Select account count, start registration |
-| `⏹ Stop` | Gracefully stop running chain |
-| `🔌 Proxies` | View/add/delete proxy pool |
-| `⚙ Config` | Edit referral code, password, API key |
-| `📤 Export` | Download chain results as `.txt` |
+### Admin Page (`/`)
+- Configure batches: generator (MiMo/QwenCloud), account count, threads, headless mode
+- Start/stop/delete batches
+- Live terminal with thread-grouped board view
+- Download `apiKey.txt` and `results.json` per batch
+- Copy individual API keys
 
-### Live Progress
+### Public Status Page (`/status`)
+- View running workers, progress, and status
+- Live terminal (read-only, emails visible)
+- No login required — share with anyone
 
-```
-🚀 Chain Running
-📌 Seed: XXXXXX
-⏱ Elapsed: 2m 15s
-
-████████░░░░░░░░
-🔵 Processing..  ·  6/10
-✅ 5 success  ·  ❌ 1 failed
-
-📋 Latest:
-✅ bulanharum75@→ USQWSH
-✅ putrilucu@→ UWCYHP
-❌ gagal@→ timeout
-```
+### Terminal Views
+- **Board View** — per-thread status cards with live task updates, progress bars, bounce animations
+- **Log View** — raw log output with syntax highlighting
+- Auto-grouped by thread `[T1]`, `[T2]`, etc. when running parallel
 
 ---
 
-## 🌐 Proxy Setup
+## 📁 Project Structure
 
-Proxy format: `ip:port:username:password`
-
-```json
-"proxy": {
-  "enabled": true,
-  "defaultCountry": "SG",
-  "proxyList": [
-    "103.1.2.3:5000:user:pass",
-    "104.1.2.3:5001:user:pass"
-  ]
-}
 ```
-
-| `defaultCountry` | Locale | Timezone |
-|---|---|---|
-| `US` | en-US | America/Chicago |
-| `SG` | en-SG | Asia/Singapore |
-| `ID` | id-ID | Asia/Jakarta |
-| `MY` | en-US | Asia/Kuala Lumpur |
-| `TH` | th-TH | Asia/Bangkok |
-| `PH` | en-PH | Asia/Manila |
-| `GB` | en-GB | Europe/London |
-
-Proxy auto-rotate per account. Dead proxies (≥3 failures) are skipped and reset after 5 minutes.
-
----
-
-## 📊 Output Format
-
-`output/chain-result.txt`:
-```
-email:password:refCode:apiKey:invitedBy
-account1@exse7en.fr:Password123:K3M2P8:sk-aaa...bbb:T9K59J
-account2@exse7en.fr:Password123:LX8N2A:sk-ccc...ddd:K3M2P8
-```
-
-`output/chain-fail.log`:
-```
-[ISO timestamp] email | error message
+mekithil/
+├── config/
+│   └── default.json           # Main configuration
+├── src/
+│   ├── core/
+│   │   ├── registration.js    # MiMo registration logic
+│   │   └── qwen-registration.js # QwenCloud registration logic
+│   ├── browser/
+│   │   ├── fingerprint.js     # Browser fingerprint generation
+│   │   ├── human.js           # Human-like behavior simulation
+│   │   └── proxy.js           # Proxy manager
+│   ├── clients/
+│   │   ├── tempmail.js        # Tempmail API client
+│   │   ├── captcha.js         # Captcha solver (auto-detect)
+│   │   ├── capmonster.js      # CapMonster API client
+│   │   └── twocaptcha.js      # 2Captcha API client
+│   └── runner/
+│       └── chain-runner.js    # MiMo chain loop runner
+├── web/
+│   ├── server.mjs             # API server (batch management, auth, file storage)
+│   ├── src/
+│   │   ├── app/
+│   │   │   ├── page.tsx       # Admin dashboard
+│   │   │   ├── login/page.tsx # Login page
+│   │   │   └── status/page.tsx # Public status page
+│   │   ├── components/
+│   │   │   └── dashboard/     # Batch table, config panel, terminals
+│   │   └── lib/
+│   │       └── auth.ts        # Auth helpers
+│   └── next.config.ts         # Next.js config with API proxy
+├── scripts/
+│   └── chain-loop.js          # CLI chain runner
+├── db/
+│   └── batches.json           # Persistent batch database
+└── output/
+    └── batch-*/               # Per-batch output (apiKey.txt, results.json, batch.log)
 ```
 
 ---
 
-## 🔐 Brand & Watermark
+## 🔌 API Endpoints
 
-This project includes hardcoded branding in the Telegram bot messages. Modifying the source to remove branding may break functionality. The public repository is provided for transparency and education.
-
----
-
-## ⚡ Performance
-
-| Scenario | Per Account |
-|---|---|
-| No proxy (local IP) | ~2-3 minutes |
-| Proxy Asia (SG/ID) | ~2.5-4 minutes |
-| Proxy US | ~4-5 minutes |
-
-Bottleneck: 2Captcha solving (60-90 seconds per account).
-
----
-
-## 🛠 Troubleshooting
-
-| Issue | Fix |
-|---|---|
-| **Captcha timeout** | 2Captcha workers busy — wait & retry. Add balance. |
-| **Account restricted** | IP flagged — switch proxy or wait hours. |
-| **Balance not credited** | Balance delayed by Xiaomi (≤5 min). Screenshot saved. |
-| **Ref code not captured** | Modal layout changed — screenshot saved for debug. |
-| **Browser zombie** | Ctrl+C → auto-close. `pkill chrome` if stuck. |
-| **Proxy dead** | Auto-marked dead, retry next proxy. |
+| Method | Endpoint | Auth | Description |
+|---|---|---|---|
+| `POST` | `/api/login` | — | Login, returns session cookie |
+| `POST` | `/api/logout` | — | Logout |
+| `GET` | `/api/me` | — | Check current session |
+| `GET` | `/api/batch` | Public | List all batches (admin: full, public: sanitized) |
+| `POST` | `/api/batch` | Admin | Start new batch |
+| `PATCH` | `/api/batch` | Admin | Stop batch |
+| `DELETE` | `/api/batch` | Admin | Delete batch |
+| `GET` | `/api/logs?id=` | Public | SSE stream for live logs |
+| `GET` | `/api/download?id=&type=` | Admin | Download apiKey.txt or results.json |
+| `GET` | `/api/stats` | Public | Global stats summary |
 
 ---
 
-## 📄 License
+## ⚙️ Generators
 
-MIT
+### MiMo (Xiaomi)
+- Registers accounts on Xiaomi MiMo Open Platform
+- Chain mode: each account uses previous account's ref code
+- Outputs: API keys, cookies (passToken, cUserId, userId)
+- Requires: Captcha API key (CapMonster or 2Captcha)
+
+### QwenCloud (Alibaba)
+- Registers accounts on QwenCloud
+- Creates API keys (sk-...) with OpenAI-compatible base URL
+- Base URL: `https://dashscope-intl.aliyuncs.com/compatible-mode/v1`
+- No captcha required
 
 ---
 
-## 👤 Author
+## 📜 License
 
-**masantoid** — [github.com/hirotomasato](https://github.com/hirotomasato)
+MIT License — Copyright (c) 2026 **Arkan Savior**
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+<p align="center">
+  <b>Made with ☕ by Arkanuy</b>
+</p>

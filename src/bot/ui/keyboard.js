@@ -1,6 +1,5 @@
 /**
  * Inline keyboard builders untuk Telegram bot.
- * Semua tombol dikumpulin disini biar gampang maintain.
  */
 
 import { Markup } from 'telegraf';
@@ -10,28 +9,28 @@ import { Markup } from 'telegraf';
 function mainMenu(proxyStatus, proxyEnabled = true) {
   const proxyIcon = proxyEnabled ? '🟢' : '🔴';
   const proxyText = proxyStatus
-    ? `${proxyIcon} Proxies: ${proxyStatus.healthy}/${proxyStatus.total}`
+    ? `${proxyIcon} Proxy (${proxyStatus.healthy}/${proxyStatus.total})`
     : `${proxyIcon} Proxy ${proxyEnabled ? 'ON' : 'OFF'}`;
   return Markup.inlineKeyboard([
-    [Markup.button.callback('▶ Run Chain', 'chain_menu'), Markup.button.callback('⏹ Stop', 'stop_btn')],
-    [Markup.button.callback(proxyText, 'proxy_menu'), Markup.button.callback('⚙ Config', 'config_menu')],
-    [Markup.button.callback('📤 Export', 'export_btn')],
+    [Markup.button.callback('🚀 Register', 'reg_menu'), Markup.button.callback('⏹ Stop', 'stop_btn')],
+    [Markup.button.callback('📤 Export', 'export_btn'), Markup.button.callback('⚙ Config', 'config_menu')],
+    [Markup.button.callback(proxyText, 'proxy_menu')],
   ]);
 }
 
-// ---- Chain Run: pilih count ------------------------------------------
+// ---- Register: pilih count ------------------------------------------
 
-function chainCountMenu(seedRef) {
+function regCountMenu(seedRef) {
   return Markup.inlineKeyboard([
     [
-      Markup.button.callback('1', 'chain_1'),
-      Markup.button.callback('3', 'chain_3'),
-      Markup.button.callback('5', 'chain_5'),
-      Markup.button.callback('10', 'chain_10'),
+      Markup.button.callback('1', 'reg_1'),
+      Markup.button.callback('3', 'reg_3'),
+      Markup.button.callback('5', 'reg_5'),
+      Markup.button.callback('10', 'reg_10'),
     ],
     [
-      Markup.button.callback('20', 'chain_20'),
-      Markup.button.callback('50', 'chain_50'),
+      Markup.button.callback('20', 'reg_20'),
+      Markup.button.callback('50', 'reg_50'),
     ],
     [Markup.button.callback('🔙 Back', 'menu')],
   ]);
@@ -39,17 +38,16 @@ function chainCountMenu(seedRef) {
 
 function stopConfirmMenu() {
   return Markup.inlineKeyboard([
-    [Markup.button.callback('⚠ Yes, Stop Chain', 'stop_confirm')],
+    [Markup.button.callback('⚠ Yes, Stop', 'stop_confirm')],
     [Markup.button.callback('🔙 Cancel', 'menu')],
   ]);
 }
 
 // ---- Proxy Management ------------------------------------------------
 
-function proxyMenu(proxyManager) {
-  const s = proxyManager ? proxyManager.status() : { total: 0, healthy: 0, dead: 0 };
+function proxyMenu() {
   return Markup.inlineKeyboard([
-    [Markup.button.callback('➕ Add Proxy', 'proxy_add'), Markup.button.callback('➖ Delete Proxy', 'proxy_del_menu')],
+    [Markup.button.callback('➕ Add', 'proxy_add'), Markup.button.callback('➖ Remove', 'proxy_del_menu')],
     [Markup.button.callback('📋 List All', 'proxy_list')],
     [Markup.button.callback('🔙 Back', 'menu')],
   ]);
@@ -69,7 +67,7 @@ function proxyListKeyboard(proxyManager, page = 0) {
     const p = proxies[i];
     const status = p.failures >= 3 ? '🔴' : '🟢';
     const ip = p.config?.server?.replace('http://', '').split(':')[0] || '?';
-    buttons.push([Markup.button.callback(`${status} ${ip}`, `proxy_nop`)]);  // info only
+    buttons.push([Markup.button.callback(`${status} ${ip}`, `proxy_nop`)]);
   }
 
   const nav = [];
@@ -104,15 +102,19 @@ function proxyDeleteList(proxyManager) {
 
 function configMenu(config) {
   const x = config.xiaomi;
+  const c = config.captcha;
   const proxyEnabled = config.proxy?.enabled !== false;
   const headless = config.browser?.headless !== false;
+  const provider = c.provider || '2captcha';
+  const providerLabel = provider === 'capmonster' ? 'CapMonster' : '2Captcha';
   return Markup.inlineKeyboard([
+    [Markup.button.callback(`🤖 ${providerLabel}`, 'config_toggle_provider')],
     [Markup.button.callback(`✏ Ref: ${x.inviteCode}`, 'config_edit_ref')],
     [Markup.button.callback(`✏ Pass: ${'*'.repeat(x.password.length)}`, 'config_edit_pass')],
-    [Markup.button.callback(`✏ API Key: ...${(config.captcha.apiKey || '').slice(-4)}`, 'config_edit_apikey')],
+    [Markup.button.callback(`✏ Captcha Key: ...${(c.apiKey || '').slice(-4)}`, 'config_edit_apikey')],
     [
-      Markup.button.callback(`${proxyEnabled ? '🟢' : '🔴'} Proxy: ${proxyEnabled ? 'ON' : 'OFF'}`, 'config_toggle_proxy'),
-      Markup.button.callback(`${headless ? '🟢' : '🔴'} Headless: ${headless ? 'ON' : 'OFF'}`, 'config_toggle_headless'),
+      Markup.button.callback(`${proxyEnabled ? '🟢' : '🔴'} Proxy ${proxyEnabled ? 'ON' : 'OFF'}`, 'config_toggle_proxy'),
+      Markup.button.callback(`${headless ? '🖥' : '👁'} ${headless ? 'Headless' : 'Visible'}`, 'config_toggle_headless'),
     ],
     [Markup.button.callback('🔙 Back', 'menu')],
   ]);
@@ -122,15 +124,13 @@ function configBack() {
   return Markup.inlineKeyboard([[Markup.button.callback('🔙 Back', 'config_menu')]]);
 }
 
-// ---- General ---------------------------------------------------------
-
 function backOnly(target = 'menu') {
   return Markup.inlineKeyboard([[Markup.button.callback('🔙 Back', target)]]);
 }
 
 export {
   mainMenu,
-  chainCountMenu,
+  regCountMenu,
   stopConfirmMenu,
   proxyMenu,
   proxyListKeyboard,
