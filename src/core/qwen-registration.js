@@ -95,26 +95,42 @@ export class QwenRegistration extends EventEmitter {
   async _pollTempmailMessages(address, timeout = 120000, interval = 5000, afterTime = 0) {
     const headers = { 'Content-Type': 'application/json' };
     if (this.tempmailSession) headers['x-session-id'] = this.tempmailSession;
+    this.log(`polling ${address} (session: ${(this.tempmailSession || 'none').slice(0, 8)}..., timeout: ${timeout/1000}s, afterTime: ${afterTime ? 'yes' : 'no'})`);
 
     const deadline = Date.now() + timeout;
+    let attempt = 0;
     while (Date.now() < deadline) {
+      attempt++;
       try {
         const res = await fetch(`${this.tempmailUrl}/inboxes/${encodeURIComponent(address)}/messages`, { headers });
         if (res.ok) {
           const messages = await res.json();
           if (messages && messages.length > 0) {
-            // Filter: only messages received after afterTime
-            const fresh = afterTime > 0
-              ? messages.filter(m => {
-                  const t = m.received_at || m.created_at || m.date || '';
-                  if (!t) return true; // no timestamp = assume fresh
-                  return new Date(t).getTime() > afterTime;
-                })
-              : messages;
-            if (fresh.length > 0) return fresh;
+            if (afterTime > 0) {
+              const fresh = messages.filter(m => {
+                const t = m.received_at || m.created_at || m.date || '';
+                if (!t) return true;
+                return new Date(t).getTime() > afterTime;
+              });
+              if (fresh.length > 0) return fresh;
+              // Log that we found messages but none passed the time filter
+              if (attempt <= 3 || attempt % 5 === 0) {
+                this.log(`found ${messages.length} msg(s) but none after time filter (latest: ${messages[0].received_at || 'no timestamp'})`);
+              }
+            } else {
+              return messages;
+            }
+          } else {
+            if (attempt <= 3 || attempt % 5 === 0) {
+              this.log(`poll #${attempt}: 0 messages`);
+            }
           }
+        } else {
+          this.log(`poll #${attempt}: HTTP ${res.status}`);
         }
-      } catch {}
+      } catch (e) {
+        if (attempt <= 3) this.log(`poll #${attempt}: error ${e.message}`);
+      }
       await sleep(interval);
     }
     throw new Error('Timeout waiting for email');
@@ -154,9 +170,11 @@ export class QwenRegistration extends EventEmitter {
     }
 
     try {
+      const launchArgs = ['--disable-blink-features=AutomationControlled'];
+      if (proxy) launchArgs.push('--ignore-certificate-errors');
       const launchOpts = {
         headless: this.config.browser?.headless ?? true,
-        args: ['--disable-blink-features=AutomationControlled'],
+        args: launchArgs,
       };
       if (proxy) launchOpts.proxy = this._parseProxy(proxy);
 
@@ -416,14 +434,26 @@ export class QwenRegistration extends EventEmitter {
   async _getVerificationCode(email, afterTime = 0) {
     this.log(`polling tempmail for verification code...`);
     try {
-      const messages = await this._pollTempmailMessages(email, 90000, 5000, afterTime);
+      // First try: with afterTime filter (strict — only new emails)
+      const messages = await this._pollTempmailMessages(email, 120000, 4000, afterTime);
       const code = this._extractCode(messages);
-      if (code) this.log(`verification code: ${code}`);
-      return code;
+      if (code) { this.log(`verification code: ${code}`); return code; }
     } catch (e) {
-      this.log(`verification code error: ${e.message}`);
-      return null;
+      this.log(`poll attempt 1: ${e.message}`);
     }
+
+    // Fallback: retry without afterTime filter (accept any email in inbox)
+    this.log(`retrying without time filter...`);
+    try {
+      const messages = await this._pollTempmailMessages(email, 60000, 3000, 0);
+      const code = this._extractCode(messages);
+      if (code) { this.log(`verification code (fallback): ${code}`); return code; }
+    } catch (e) {
+      this.log(`poll attempt 2: ${e.message}`);
+    }
+
+    this.log(`verification code not found after all attempts`);
+    return null;
   }
 
   // ── API Key Creation ─────────────────────────────────
@@ -581,8 +611,8 @@ export class QwenRegistration extends EventEmitter {
     if (!proxy) return undefined;
     let p = proxy.trim();
     if (!p.includes('://')) p = `http://${p}`;
-    const m = p.match(/^(?:https?:\/\/)?(?:([^:]+):([^@]+)@)?([^:]+):(\d+)$/);
-    if (m) return { server: `http://${m[3]}:${m[4]}`, username: m[1] || undefined, password: m[2] || undefined };
+    const m = p.match(/^(socks[45]|https?):\/\/(?:([^:]+):([^@]+)@)?([^:]+):(\d+)$/);
+    if (m) return { server: `${m[1]}://${m[4]}:${m[5]}`, username: m[2] || undefined, password: m[3] || undefined };
     return { server: p };
   }
 

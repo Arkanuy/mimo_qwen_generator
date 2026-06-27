@@ -7,6 +7,7 @@ import { BatchTable } from "@/components/dashboard/batch-table";
 import { LogTerminal } from "@/components/dashboard/terminal";
 import { ConfigPanel } from "@/components/dashboard/config-panel";
 import { Activity, Layers, Cpu, LogOut, Users } from "lucide-react";
+import { TempmailViewer } from "@/components/dashboard/tempmail-viewer";
 import { getMe, logout } from "@/lib/auth";
 
 const API = "";
@@ -52,7 +53,7 @@ export default function Dashboard() {
 
   const fetchBatches = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/api/batch`, { credentials: "include" });
+      const res = await fetch(`${API}/api/batches`, { credentials: "include" });
       const data = await res.json();
       setBatches(data);
       setIsRunning(data.some((b: Batch) => b.status === "running"));
@@ -202,6 +203,11 @@ export default function Dashboard() {
             )}
           </div>
           <BatchTable batches={batches} selectedBatch={selectedBatch} onSelect={setSelectedBatch} onStop={handleStop} onDelete={handleDelete} />
+        </div>
+
+        {/* Tempmail Inbox */}
+        <div className="mb-4 sm:mb-6">
+          <TempmailViewer />
         </div>
 
         {/* Rich Terminal */}

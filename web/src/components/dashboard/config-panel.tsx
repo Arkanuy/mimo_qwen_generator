@@ -2,7 +2,7 @@
 
 import { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Play, Settings, Loader2, Monitor, Eye, ChevronDown, ChevronUp, Zap, Cloud } from "lucide-react";
+import { Play, Settings, Loader2, Monitor, Eye, ChevronDown, ChevronUp, Zap, Cloud, Globe } from "lucide-react";
 
 interface BatchConfig {
   generator: "mimo" | "qwencloud";
@@ -15,6 +15,7 @@ interface BatchConfig {
   captchaApiKey: string;
   tempmailUrl: string;
   country: string;
+  proxies: string;
 }
 
 interface ConfigPanelProps {
@@ -91,6 +92,7 @@ export function ConfigPanel({ onStart, isRunning }: ConfigPanelProps) {
     captchaApiKey: "fb46ddaf60bad7dbc5066308a5b73349",
     tempmailUrl: "https://tempik.hindiabelanda.my.id/api",
     country: "",
+    proxies: "",
   });
 
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -99,6 +101,8 @@ export function ConfigPanel({ onStart, isRunning }: ConfigPanelProps) {
   const update = <K extends keyof BatchConfig>(key: K, value: BatchConfig[K]) => {
     setConfig(prev => ({ ...prev, [key]: value }));
   };
+
+  const proxyCount = config.proxies.split("\n").filter(l => l.trim().includes(":")).length;
 
   return (
     <div className="space-y-4">
@@ -113,40 +117,37 @@ export function ConfigPanel({ onStart, isRunning }: ConfigPanelProps) {
         {/* Account Count */}
         <div className="space-y-1.5">
           <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Accounts</label>
-          <input type="number" min={1} max={100} value={config.count}
-            onChange={e => update("count", parseInt(e.target.value) || 1)}
+          <input type="number" min={1} max={9999} value={config.count} onChange={e => update("count", Math.max(1, parseInt(e.target.value) || 1))}
             className="w-full h-10 px-3 rounded-xl bg-muted/50 border border-border/50 text-sm font-mono focus:outline-none focus:border-foreground/30 transition-colors" />
         </div>
 
         {/* Threads */}
         <div className="space-y-1.5">
           <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Threads</label>
-          <input type="number" min={1} max={20} value={config.threads}
-            onChange={e => { const v = parseInt(e.target.value) || 1; update("threads", Math.min(20, Math.max(1, v))); }}
+          <input type="number" min={1} max={20} value={config.threads} onChange={e => update("threads", Math.min(20, Math.max(1, parseInt(e.target.value) || 1)))}
             className="w-full h-10 px-3 rounded-xl bg-muted/50 border border-border/50 text-sm font-mono focus:outline-none focus:border-foreground/30 transition-colors" />
+        </div>
+
+        {/* Headless */}
+        <div className="space-y-1.5">
+          <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Browser</label>
+          <button type="button" onClick={() => update("headless", !config.headless)}
+            className={`w-full h-10 px-3 rounded-xl border text-sm font-medium flex items-center justify-center gap-2 transition-colors ${
+              config.headless ? "bg-muted/50 border-border/50 text-muted-foreground" : "bg-foreground/10 border-foreground/20 text-foreground"
+            }`}>
+            {config.headless ? <Eye className="w-3.5 h-3.5" /> : <Monitor className="w-3.5 h-3.5" />}
+            {config.headless ? "Headless" : "Visible"}
+          </button>
         </div>
 
         {/* Seed Code (MiMo only) */}
         {isMimo && (
           <div className="space-y-1.5">
-            <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Seed Code</label>
-            <input type="text" value={config.seedCode} maxLength={6}
-              onChange={e => update("seedCode", e.target.value.toUpperCase())}
-              className="w-full h-10 px-3 rounded-xl bg-muted/50 border border-border/50 text-sm font-mono uppercase focus:outline-none focus:border-foreground/30 transition-colors" />
+            <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Invite Code</label>
+            <input type="text" value={config.seedCode} onChange={e => update("seedCode", e.target.value)}
+              className="w-full h-10 px-3 rounded-xl bg-muted/50 border border-border/50 text-sm font-mono focus:outline-none focus:border-foreground/30 transition-colors" />
           </div>
         )}
-
-        {/* Headless Toggle */}
-        <div className="space-y-1.5">
-          <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Browser</label>
-          <button onClick={() => update("headless", !config.headless)}
-            className={`w-full h-10 px-3 rounded-xl border text-sm font-medium flex items-center justify-center gap-2 transition-colors active:scale-[0.97] ${
-              config.headless ? "bg-muted/50 border-border/50 text-muted-foreground hover:bg-muted/70"
-                : "bg-green-500/10 border-green-500/30 text-green-400 hover:bg-green-500/15"
-            }`}>
-            {config.headless ? <><Monitor className="w-4 h-4" /> Headless</> : <><Eye className="w-4 h-4" /> Visible</>}
-          </button>
-        </div>
 
         {/* Start Button */}
         <div className={`space-y-1.5 ${isMimo ? "col-span-2 sm:col-span-3 lg:col-span-1" : "col-span-2 sm:col-span-3 lg:col-span-1"}`}>
@@ -212,6 +213,28 @@ export function ConfigPanel({ onStart, isRunning }: ConfigPanelProps) {
                   </div>
                 </>
               )}
+            </div>
+
+            {/* Proxy List — common for both generators */}
+            <div className="space-y-1.5 pt-3">
+              <div className="flex items-center justify-between">
+                <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
+                  <Globe className="w-3 h-3" /> Proxy List
+                </label>
+                {proxyCount > 0 && (
+                  <span className="text-[10px] text-muted-foreground">{proxyCount} proxy loaded</span>
+                )}
+              </div>
+              <textarea
+                value={config.proxies}
+                onChange={e => update("proxies", e.target.value)}
+                placeholder={"ip:port:user:pass\nip:port:user:pass\nip:port (no auth)"}
+                rows={4}
+                className="w-full px-3 py-2.5 rounded-xl bg-muted/50 border border-border/50 text-sm font-mono focus:outline-none focus:border-foreground/30 transition-colors resize-none placeholder:text-muted-foreground/40"
+              />
+              <p className="text-[10px] text-muted-foreground/60">
+                One proxy per line. Format: <code className="text-foreground/60">ip:port:user:pass</code> or <code className="text-foreground/60">ip:port</code>. Proxy is tested before use; falls back to direct if all fail.
+              </p>
             </div>
           </motion.div>
         )}
