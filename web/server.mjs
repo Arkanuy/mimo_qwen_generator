@@ -528,6 +528,34 @@ const server = http.createServer(async (req, res) => {
       totalSuccess: all.reduce((s, b) => s + b.progress.success, 0), totalFailed: all.reduce((s, b) => s + b.progress.failed, 0) });
   }
 
+
+  // Fetch proxies from ProxyScrape API — test in parallel, return only alive
+  if (req.method === "GET" && url.pathname === "/api/proxies") {
+    try {
+      const protocol = url.searchParams.get("protocol") || "socks5";
+      const apiUrl = `https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&proxy_format=protocolipport&format=text&protocol=${protocol}&timeout=5000`;
+      const resp = await fetch(apiUrl);
+      if (!resp.ok) return sendJSON(req, res, { error: `ProxyScrape returned ${resp.status}` }, 502);
+      const text = await resp.text();
+      const rawLines = text.split("\n").filter(l => l.trim());
+      const parsed = rawLines.map(parseProxyLine).filter(Boolean);
+
+      // Test up to 50 proxies in parallel, 3s timeout each
+      const toTest = shuffle([...parsed]).slice(0, 50);
+      const results = await Promise.allSettled(toTest.map(async (p) => {
+        const ok = await testProxyTCP(p, 3000);
+        return { proxy: p, ok };
+      }));
+      const alive = results
+        .filter(r => r.status === "fulfilled" && r.value.ok)
+        .map(r => r.value.proxy.server);
+
+      return sendJSON(req, res, { proxies: alive, count: alive.length, tested: toTest.length, raw: rawLines.length, protocol });
+    } catch (e) {
+      return sendJSON(req, res, { error: e.message }, 500);
+    }
+  }
+
   // Admin-only
   if (req.method === "POST" && url.pathname === "/api/batch") {
     if (!isAdmin(req)) return sendJSON(req, res, { error: "Unauthorized" }, 401);

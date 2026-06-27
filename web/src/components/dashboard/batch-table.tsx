@@ -287,6 +287,8 @@ export function BatchTable({ batches, selectedBatch, onSelect, onStop, onDelete 
                         <Square className="w-3.5 h-3.5" />
                       </button>
                     )}
+                    <DownloadBtn id={batch.id} type="txt" label="apiKey.txt" />
+                    <DownloadBtn id={batch.id} type="json" label="results.json" />
                     <button onClick={e => { e.stopPropagation(); onSelect(batch.id); }}
                       className="p-2 rounded-lg bg-muted hover:bg-muted/80 border border-border/50 transition-colors" title="Details">
                       <Eye className="w-3.5 h-3.5" />
@@ -314,6 +316,8 @@ export function BatchTable({ batches, selectedBatch, onSelect, onStop, onDelete 
                           <Square className="w-3 h-3" />
                         </button>
                       )}
+                      <DownloadBtn id={batch.id} type="txt" label="apiKey.txt" />
+                      <DownloadBtn id={batch.id} type="json" label="results.json" />
                       <button onClick={e => { e.stopPropagation(); onSelect(batch.id); }}
                         className="p-1.5 rounded-md bg-muted hover:bg-muted/80 border border-border/50">
                         <Eye className="w-3 h-3" />

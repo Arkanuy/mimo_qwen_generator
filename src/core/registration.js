@@ -2069,23 +2069,33 @@ class MimoRegistration {
       return existingKey;
     }
 
-    // Click "Create API Key" button
+    // Click "Create API Key" button — retry with page reload if not found
     console.log('  Clicking "Create API Key" button...');
-    const createBtn = await this.page.$('button:has-text("Create API Key"), .ant-btn:has-text("Create API Key")');
-    if (createBtn) {
-      await createBtn.click({ force: true });
-    } else {
-      const evalClicked = await this.page.evaluate(() => {
-        const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Create API Key'));
-        if (btn) {
-          btn.click();
-          return true;
-        }
-        return false;
-      });
-      if (!evalClicked) {
-        throw new Error('Create API Key button not found');
+    let clicked = false;
+    for (let retry = 0; retry < 3 && !clicked; retry++) {
+      if (retry > 0) {
+        console.log(`  Retry ${retry}/2: reloading API keys page...`);
+        await this.page.goto('https://platform.xiaomimimo.com/console/api-keys', { waitUntil: 'networkidle', timeout: 30000 }).catch(() => {});
+        await this.page.waitForTimeout(3000);
+        await this.handleOAuthRedirect().catch(() => {});
+        await this.handleTermsModal().catch(() => {});
+        await this.waitForOverlaysGone().catch(() => {});
       }
+      const createBtn = await this.page.$('button:has-text("Create API Key"), .ant-btn:has-text("Create API Key")');
+      if (createBtn) {
+        await createBtn.click({ force: true });
+        clicked = true;
+      } else {
+        const evalClicked = await this.page.evaluate(() => {
+          const btn = Array.from(document.querySelectorAll('button')).find(b => b.textContent.includes('Create API Key'));
+          if (btn) { btn.click(); return true; }
+          return false;
+        });
+        if (evalClicked) clicked = true;
+      }
+    }
+    if (!clicked) {
+      throw new Error('Create API Key button not found');
     }
     
     await this.page.waitForTimeout(2000);

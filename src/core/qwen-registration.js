@@ -120,12 +120,21 @@ export class QwenRegistration extends EventEmitter {
 
   _extractCode(messages) {
     for (const msg of messages) {
-      const content = (msg.subject || '') + ' ' + (msg.body || msg.text || msg.html || '');
+      // Prefer plain text over HTML to avoid matching CSS/attribute numbers
+      const rawText = (msg.text || msg.body || '');
+      const htmlStripped = (msg.html || '').replace(/<[^>]*>/g, ' ').replace(/&[a-z]+;/gi, ' ');
+      const content = ((msg.subject || '') + ' ' + rawText + ' ' + htmlStripped).replace(/\s+/g, ' ');
+
       const patterns = [
-        /verification code[:\s]+([0-9]{4,8})/i,
-        /Your verification code is[:\s]+([0-9]{4,8})/i,
-        /code[:\s]+([0-9]{4,8})/i,
-        /([0-9]{6})/,
+        // "verification code ... is: 231882" (handles "for Qwen Cloud is:" etc.)
+        /verification\s+code[^0-9]*?(\d{4,8})/i,
+        // "Your verification code ... 231882"
+        /your\s+verification[^0-9]*?(\d{4,8})/i,
+        // "code: 231882" or "code is: 231882"
+        /code[:\s]+is[:\s]+(\d{4,8})/i,
+        /code[:\s]+(\d{4,8})/i,
+        // Standalone 4-8 digit code on its own line (from plain text only)
+        /^\s*(\d{4,8})\s*$/m,
       ];
       for (const p of patterns) {
         const m = content.match(p);
@@ -152,7 +161,14 @@ export class QwenRegistration extends EventEmitter {
     }
 
     try {
-      const launchArgs = ['--disable-blink-features=AutomationControlled'];
+      const launchArgs = [
+        '--disable-blink-features=AutomationControlled',
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--window-size=1366,768',
+      ];
       if (proxy) launchArgs.push('--ignore-certificate-errors');
       const launchOpts = {
         headless: this.config.browser?.headless ?? true,
@@ -171,8 +187,8 @@ export class QwenRegistration extends EventEmitter {
       this.log(`QwenCloud | email=${email} | country=${selectedCountry}`);
 
       // 1. Go to QwenCloud
-      await this.page.goto('https://home.qwencloud.com/', { waitUntil: 'commit', timeout: 30000 });
-      await this._waitForText('Log In', 20000);
+      await this.page.goto('https://home.qwencloud.com/', { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await this._waitForText('Log In', 25000);
 
       const url = this.page.url();
       this.log(`landing: ${url.substring(0, 80)}...`);
@@ -180,7 +196,16 @@ export class QwenRegistration extends EventEmitter {
       // 2. Navigate to signup
       if (url.includes('sso/login') || (await this.page.title()).includes('Log In')) {
         await this.page.getByRole('link', { name: 'Sign Up' }).click();
-        await this.page.waitForURL(/\/sso\/register/, { timeout: 15000 });
+        try {
+          await this.page.waitForURL(/\/sso\/register/, { timeout: 20000 });
+        } catch {
+          // Maybe already on register page or page loaded differently
+          const curUrl = this.page.url();
+          if (!curUrl.includes('register')) {
+            this.log(`still on ${curUrl.substring(0, 60)} after clicking Sign Up, trying direct nav`);
+            await this.page.goto('https://account.alibabacloud.com/sso/register', { waitUntil: 'commit', timeout: 15000 }).catch(() => {});
+          }
+        }
       }
 
       // 3. Do signup
@@ -305,15 +330,18 @@ export class QwenRegistration extends EventEmitter {
     const otpUrl = this.page.url();
     this.log(`after OTP URL: ${otpUrl}`);
 
-    // Check for OTP error messages immediately
+    // Check for OTP / validation error messages immediately
     try {
-      const errText = await this.page.evaluate(() => {
-        const els = document.querySelectorAll('[class*="error"], [class*="Error"], [class*="alert"], [class*="Alert"], [role="alert"]');
-        return Array.from(els).map(e => e.innerText).filter(t => t.trim()).join(' | ');
-      });
-      if (errText && (errText.toLowerCase().includes('incorrect') || errText.toLowerCase().includes('invalid') || errText.toLowerCase().includes('wrong') || errText.toLowerCase().includes('expired') || errText.toLowerCase().includes('fail'))) {
-        this.log(`OTP error detected: ${errText}`);
-        return { status: 'error', reason: `otp-error: ${errText.substring(0, 200)}` };
+      const pageText = await this.page.evaluate(() => document.body.innerText);
+      const lowerText = pageText.toLowerCase();
+      const errorPhrases = ['incorrect', 'invalid', 'wrong code', 'expired', 'verification failed', 'account number format', 'try again', 'error occurred'];
+      const foundError = errorPhrases.find(p => lowerText.includes(p));
+      if (foundError) {
+        // Extract surrounding context
+        const idx = lowerText.indexOf(foundError);
+        const snippet = pageText.substring(Math.max(0, idx - 30), idx + 80).replace(/\s+/g, ' ').trim();
+        this.log(`OTP error detected (${foundError}): ${snippet}`);
+        return { status: 'error', reason: `otp-error: ${snippet}` };
       }
     } catch {}
 
@@ -465,15 +493,30 @@ export class QwenRegistration extends EventEmitter {
   // ── Verification Code ────────────────────────────────
   async _getVerificationCode(email, afterTime = 0) {
     this.log(`polling tempmail for verification code...`);
-    // Skip afterTime filter — the inbox is freshly created, all messages belong to this session
-    try {
-      const messages = await this._pollTempmailMessages(email, 300000, 3000, 0);
-      const code = this._extractCode(messages);
-      if (code) { this.log(`verification code: ${code}`); return code; }
-    } catch (e) {
-      this.log(`poll error: ${e.message}`);
+    const deadline = Date.now() + 300000;
+    let attempt = 0;
+    let seenMsgCount = 0;
+    while (Date.now() < deadline) {
+      attempt++;
+      try {
+        const res = await fetch(`${this.tempmailUrl}/inboxes/${encodeURIComponent(email)}/messages`, {
+          headers: { 'Content-Type': 'application/json', ...(this.tempmailSession ? { 'x-session-id': this.tempmailSession } : {}) }
+        });
+        if (res.ok) {
+          const messages = await res.json();
+          if (messages && messages.length > seenMsgCount) {
+            seenMsgCount = messages.length;
+            this.log(`got ${messages.length} message(s), checking for code...`);
+            const code = this._extractCode(messages);
+            if (code) { this.log(`verification code: ${code}`); return code; }
+          }
+        }
+      } catch (e) {
+        if (attempt <= 3) this.log(`poll error: ${e.message}`);
+      }
+      await sleep(3000);
     }
-    this.log(`verification code not found`);
+    this.log(`verification code not found after ${attempt} polls`);
     return null;
   }
 

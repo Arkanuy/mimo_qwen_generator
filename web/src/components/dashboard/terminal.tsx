@@ -74,11 +74,14 @@ function derive(logs: string[]) {
   const maxTotal = threads.reduce((m, t) => Math.max(m, t.total), 0);
   const total = maxTotal || batchTotal || threads.length;
 
+  const perThreadTotal = threads.length > 0 ? Math.ceil(total / threads.length) : 0;
+
   return {
     threads,
     systemLines,
     summary: {
       total,
+      perThreadTotal,
       done: threads.reduce((s, t) => s + t.threadDone, 0),
       success: threads.reduce((s, t) => s + (t.status === "success" ? t.threadDone : 0), 0),
       failed: threads.reduce((s, t) => s + (t.status === "failed" ? t.threadDone : 0), 0),
@@ -238,9 +241,9 @@ export function LogTerminal({ logs, batchId, onClose }: TerminalProps) {
                       <div className="flex items-center gap-2 mb-1.5">
                         <StatusDot s={t.status} />
                         <span className={`text-xs sm:text-sm font-bold font-mono ${ac.text}`}>{t.id}</span>
-                        {t.threadAssigned > 0 && (
+                        {summary.perThreadTotal > 0 && (
                           <span className="text-[10px] text-zinc-500 font-mono truncate">
-                            {t.threadDone > 0 && `${t.threadDone}/${t.threadAssigned}`}
+                            {`${t.threadDone}/${summary.perThreadTotal}`}
                           </span>
                         )}
                         {t.status === "working" && (
@@ -272,7 +275,7 @@ export function LogTerminal({ logs, batchId, onClose }: TerminalProps) {
                               : t.status === "failed" ? "bg-red-500/60"
                               : `${ac.bar}/60`
                             }`}
-                            style={{ width: `${(t.threadDone / Math.max(t.threadAssigned, 1)) * 100}%` }}
+                            style={{ width: `${Math.min((t.threadDone / Math.max(summary.perThreadTotal, 1)) * 100, 100)}%` }}
                           />
                         </div>
                       )}

@@ -221,9 +221,25 @@ export function ConfigPanel({ onStart, isRunning }: ConfigPanelProps) {
                 <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-1.5">
                   <Globe className="w-3 h-3" /> Proxy List
                 </label>
-                {proxyCount > 0 && (
-                  <span className="text-[10px] text-muted-foreground">{proxyCount} proxy loaded</span>
-                )}
+                <div className="flex items-center gap-2">
+                  {proxyCount > 0 && (
+                    <span className="text-[10px] text-muted-foreground">{proxyCount} proxy loaded</span>
+                  )}
+                  <button type="button" onClick={async () => {
+                    try {
+                      const res = await fetch("/api/proxies?protocol=socks5");
+                      const data = await res.json();
+                      if (data.proxies && data.proxies.length > 0) {
+                        const current = config.proxies.trim();
+                        const newProxies = data.proxies.join("\n");
+                        update("proxies", current ? current + "\n" + newProxies : newProxies);
+                      }
+                    } catch {}
+                  }}
+                    className="text-[10px] px-2 py-1 rounded-md bg-muted hover:bg-muted/80 border border-border/50 text-muted-foreground hover:text-foreground transition-colors">
+                    Auto Fetch
+                  </button>
+                </div>
               </div>
               <textarea
                 value={config.proxies}
