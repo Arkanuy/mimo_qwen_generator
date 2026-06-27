@@ -119,7 +119,13 @@ export class QwenRegistration extends EventEmitter {
   }
 
   _extractCode(messages) {
-    for (const msg of messages) {
+    // Sort newest first so we check the latest message
+    const sorted = [...messages].sort((a, b) => {
+      const ta = a.createdAt || a.date || a.timestamp || '';
+      const tb = b.createdAt || b.date || b.timestamp || '';
+      return tb.localeCompare(ta);
+    });
+    for (const msg of sorted) {
       // Prefer plain text over HTML to avoid matching CSS/attribute numbers
       const rawText = (msg.text || msg.body || '');
       const htmlStripped = (msg.html || '').replace(/<[^>]*>/g, ' ').replace(/&[a-z]+;/gi, ' ');
@@ -495,7 +501,7 @@ export class QwenRegistration extends EventEmitter {
     this.log(`polling tempmail for verification code...`);
     const deadline = Date.now() + 300000;
     let attempt = 0;
-    let seenMsgCount = 0;
+    let lastMsgCount = 0;
     while (Date.now() < deadline) {
       attempt++;
       try {
@@ -504,9 +510,11 @@ export class QwenRegistration extends EventEmitter {
         });
         if (res.ok) {
           const messages = await res.json();
-          if (messages && messages.length > seenMsgCount) {
-            seenMsgCount = messages.length;
-            this.log(`got ${messages.length} message(s), checking for code...`);
+          if (messages && messages.length > 0) {
+            if (messages.length !== lastMsgCount) {
+              lastMsgCount = messages.length;
+              this.log(`got ${messages.length} message(s), checking for code...`);
+            }
             const code = this._extractCode(messages);
             if (code) { this.log(`verification code: ${code}`); return code; }
           }

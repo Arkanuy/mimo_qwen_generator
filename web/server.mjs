@@ -89,6 +89,20 @@ function testProxyTCP(proxyObj, timeoutMs = 3000) {
   });
 }
 
+// Test proxy can actually fetch a page (not just TCP connect)
+async function testProxyHTTP(proxyObj, timeoutMs = 8000) {
+  const { execSync } = await import('child_process');
+  try {
+    const proto = proxyObj.server.startsWith('socks') ? '--socks5-hostname' : '--proxy';
+    const url = proxyObj.server.replace(/^(socks[45]|http):\/\//, '');
+    execSync(
+      `curl -s -o /dev/null -w "%{http_code}" ${proto} ${url} --connect-timeout 5 --max-time ${Math.floor(timeoutMs/1000)} https://httpbin.org/ip`,
+      { timeout: timeoutMs + 2000, stdio: 'pipe' }
+    );
+    return true;
+  } catch { return false; }
+}
+
 function shuffle(arr) {
   for (let i = arr.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [arr[i], arr[j]] = [arr[j], arr[i]]; }
   return arr;
@@ -104,20 +118,35 @@ async function pickWorkingProxy(proxyText, logFn) {
   if (all.length === 0) return null;
   const candidates = shuffle([...all]).slice(0, 10);
   log(`Testing ${candidates.length} proxy(ies)...`);
-  const results = await Promise.allSettled(candidates.map(async (proxy) => {
+  // First: TCP check in parallel
+  const tcpResults = await Promise.allSettled(candidates.map(async (proxy) => {
     const label = proxy.server.replace(/^(socks[45]|http):\/\//, "");
     const ok = await testProxyTCP(proxy, 3000);
     return { proxy, label, ok };
   }));
-  for (const r of results) {
-    if (r.status === "fulfilled" && r.value.ok) {
-      log(`✓ Proxy alive: ${r.value.label} (${r.value.proxy.server.split("://")[0]})`);
-      return r.value.proxy;
-    }
+  const alive = tcpResults
+    .filter(r => r.status === "fulfilled" && r.value.ok)
+    .map(r => r.value);
+  for (const r of tcpResults) {
+    if (r.status === "fulfilled" && !r.value.ok) log(`✗ Proxy dead: ${r.value.label}`);
   }
-  for (const r of results) { if (r.status === "fulfilled") log(`✗ Proxy dead: ${r.value.label}`); }
-  log("⚠ All proxies failed — falling back to direct connection");
-  return null;
+  if (alive.length === 0) {
+    log("⚠ All proxies failed TCP — falling back to direct connection");
+    return null;
+  }
+  // Second: HTTP test top 3 TCP-alive proxies
+  const httpCandidates = alive.slice(0, 3);
+  for (const { proxy, label } of httpCandidates) {
+    const httpOk = await testProxyHTTP(proxy, 8000);
+    if (httpOk) {
+      log(`✓ Proxy alive: ${label} (${proxy.server.split("://")[0]})`);
+      return proxy;
+    }
+    log(`✗ Proxy TCP ok but HTTP fail: ${label}`);
+  }
+  // Fallback: use first TCP-alive proxy anyway
+  log(`✓ Proxy alive (TCP only): ${alive[0].label}`);
+  return alive[0].proxy;
 }
 
 function buildChromeArgs(fp, useProxy) {
@@ -542,11 +571,21 @@ const server = http.createServer(async (req, res) => {
 
       // Test up to 50 proxies in parallel, 3s timeout each
       const toTest = shuffle([...parsed]).slice(0, 50);
-      const results = await Promise.allSettled(toTest.map(async (p) => {
+      // TCP check first
+      const tcpResults = await Promise.allSettled(toTest.map(async (p) => {
         const ok = await testProxyTCP(p, 3000);
         return { proxy: p, ok };
       }));
-      const alive = results
+      const tcpAlive = tcpResults
+        .filter(r => r.status === "fulfilled" && r.value.ok)
+        .map(r => r.value.proxy);
+      // HTTP check top 20 TCP-alive
+      const httpTest = tcpAlive.slice(0, 20);
+      const httpResults = await Promise.allSettled(httpTest.map(async (p) => {
+        const ok = await testProxyHTTP(p, 8000);
+        return { proxy: p, ok };
+      }));
+      const alive = httpResults
         .filter(r => r.status === "fulfilled" && r.value.ok)
         .map(r => r.value.proxy.server);
 
