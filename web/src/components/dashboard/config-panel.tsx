@@ -96,6 +96,7 @@ export function ConfigPanel({ onStart, isRunning }: ConfigPanelProps) {
   });
 
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [fetchingProxies, setFetchingProxies] = useState(false);
   const isMimo = config.generator === "mimo";
 
   const update = <K extends keyof BatchConfig>(key: K, value: BatchConfig[K]) => {
@@ -225,7 +226,8 @@ export function ConfigPanel({ onStart, isRunning }: ConfigPanelProps) {
                   {proxyCount > 0 && (
                     <span className="text-[10px] text-muted-foreground">{proxyCount} proxy loaded</span>
                   )}
-                  <button type="button" onClick={async () => {
+                  <button type="button" disabled={fetchingProxies} onClick={async () => {
+                    setFetchingProxies(true);
                     try {
                       const res = await fetch("/api/proxies?protocol=socks5");
                       const data = await res.json();
@@ -235,9 +237,10 @@ export function ConfigPanel({ onStart, isRunning }: ConfigPanelProps) {
                         update("proxies", current ? current + "\n" + newProxies : newProxies);
                       }
                     } catch {}
+                    setFetchingProxies(false);
                   }}
-                    className="text-[10px] px-2 py-1 rounded-md bg-muted hover:bg-muted/80 border border-border/50 text-muted-foreground hover:text-foreground transition-colors">
-                    Auto Fetch
+                    className={`text-[10px] px-2 py-1 rounded-md border border-border/50 transition-colors flex items-center gap-1 ${fetchingProxies ? "bg-muted/50 text-muted-foreground cursor-wait" : "bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground"}`}>
+                    {fetchingProxies ? <><Loader2 className="w-3 h-3 animate-spin" /> Testing...</> : "Auto Fetch"}
                   </button>
                 </div>
               </div>

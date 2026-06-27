@@ -6,6 +6,7 @@
  * Supports proxy rotation with TCP pre-check + live retry.
  */
 import http from "http";
+import { startTunnel } from "./socks-tunnel.mjs";
 import net from "net";
 import { readFileSync, existsSync, mkdirSync, writeFileSync, appendFileSync } from "fs";
 import { join, dirname } from "path";
@@ -91,16 +92,24 @@ function testProxyTCP(proxyObj, timeoutMs = 3000) {
 
 // Test proxy can actually fetch a page (not just TCP connect)
 async function testProxyHTTP(proxyObj, timeoutMs = 8000) {
-  const { execSync } = await import('child_process');
-  try {
-    const proto = proxyObj.server.startsWith('socks') ? '--socks5-hostname' : '--proxy';
-    const url = proxyObj.server.replace(/^(socks[45]|http):\/\//, '');
-    execSync(
-      `curl -s -o /dev/null -w "%{http_code}" ${proto} ${url} --connect-timeout 5 --max-time ${Math.floor(timeoutMs/1000)} https://httpbin.org/ip`,
-      { timeout: timeoutMs + 2000, stdio: 'pipe' }
-    );
-    return true;
-  } catch { return false; }
+  const { execFile } = await import('child_process');
+  return new Promise((resolve) => {
+    try {
+      const proto = proxyObj.server.startsWith('socks') ? '--socks5-hostname' : '--proxy';
+      const url = proxyObj.server.replace(/^(socks[45]|http):\/\//, '');
+      const timer = setTimeout(() => resolve(false), timeoutMs);
+      execFile('curl', [
+        '-s', '-o', '/dev/null', '-w', '%{http_code}',
+        proto, url,
+        '--connect-timeout', '5',
+        '--max-time', '6',
+        'https://www.google.com/generate_204'
+      ], { timeout: timeoutMs }, (err, stdout) => {
+        clearTimeout(timer);
+        resolve(!err && (stdout.trim() === '204' || stdout.trim() === '200'));
+      });
+    } catch { resolve(false); }
+  });
 }
 
 function shuffle(arr) {
@@ -131,21 +140,10 @@ async function pickWorkingProxy(proxyText, logFn) {
     if (r.status === "fulfilled" && !r.value.ok) log(`✗ Proxy dead: ${r.value.label}`);
   }
   if (alive.length === 0) {
-    log("⚠ All proxies failed TCP — falling back to direct connection");
+    log("⚠ All proxies failed — falling back to direct connection");
     return null;
   }
-  // Second: HTTP test top 3 TCP-alive proxies
-  const httpCandidates = alive.slice(0, 3);
-  for (const { proxy, label } of httpCandidates) {
-    const httpOk = await testProxyHTTP(proxy, 8000);
-    if (httpOk) {
-      log(`✓ Proxy alive: ${label} (${proxy.server.split("://")[0]})`);
-      return proxy;
-    }
-    log(`✗ Proxy TCP ok but HTTP fail: ${label}`);
-  }
-  // Fallback: use first TCP-alive proxy anyway
-  log(`✓ Proxy alive (TCP only): ${alive[0].label}`);
+  log(`✓ Proxy alive: ${alive[0].label} (${alive[0].proxy.server.split("://")[0]})`);
   return alive[0].proxy;
 }
 
@@ -276,7 +274,17 @@ async function runMimoBatch(batchId, config) {
         try {
           const chromeArgs = buildChromeArgs(fp, !!proxyObj);
           const launchOpts = { headless: config.headless, channel: "chrome", args: chromeArgs };
-          if (proxyObj) launchOpts.proxy = proxyObj;
+          let tunnel = null;
+          if (proxyObj) {
+            if (proxyObj.username && proxyObj.password) {
+              // SOCKS5 auth not supported by Chromium — create local tunnel
+              tunnel = await startTunnel(proxyObj);
+              launchOpts.proxy = { server: `socks5://127.0.0.1:${tunnel.port}` };
+              addLog(batchId, `${tag} Tunnel: 127.0.0.1:${tunnel.port} -> ${proxyObj.server.replace(/^(socks[45]|http):\/\//, "")}`);
+            } else {
+              launchOpts.proxy = proxyObj;
+            }
+          }
 
           reg.browser = await chromium.launch(launchOpts);
           const ctx = await reg.browser.newContext({
@@ -326,6 +334,7 @@ async function runMimoBatch(batchId, config) {
           }
         } finally {
           if (reg.browser) await reg.browser.close().catch(() => {});
+          if (tunnel) { try { tunnel.close(); } catch {} }
         }
       }
 
@@ -571,21 +580,12 @@ const server = http.createServer(async (req, res) => {
 
       // Test up to 50 proxies in parallel, 3s timeout each
       const toTest = shuffle([...parsed]).slice(0, 50);
-      // TCP check first
+      // TCP check — fast
       const tcpResults = await Promise.allSettled(toTest.map(async (p) => {
         const ok = await testProxyTCP(p, 3000);
         return { proxy: p, ok };
       }));
-      const tcpAlive = tcpResults
-        .filter(r => r.status === "fulfilled" && r.value.ok)
-        .map(r => r.value.proxy);
-      // HTTP check top 20 TCP-alive
-      const httpTest = tcpAlive.slice(0, 20);
-      const httpResults = await Promise.allSettled(httpTest.map(async (p) => {
-        const ok = await testProxyHTTP(p, 8000);
-        return { proxy: p, ok };
-      }));
-      const alive = httpResults
+      const alive = tcpResults
         .filter(r => r.status === "fulfilled" && r.value.ok)
         .map(r => r.value.proxy.server);
 

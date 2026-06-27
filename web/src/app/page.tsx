@@ -207,15 +207,15 @@ export default function Dashboard() {
             )}
           </div>
           <BatchTable batches={batches} selectedBatch={selectedBatch} onSelect={setSelectedBatch} onStop={handleStop} onDelete={handleDelete} />
+
+
+          {/* Terminal right below batch table */}
+          <AnimatePresence>
+            {selectedBatch && (
+              <LogTerminal logs={liveLogs} batchId={selectedBatch} onClose={() => setSelectedBatch(null)} />
+            )}
+          </AnimatePresence>
         </div>
-
-
-        {/* Single terminal view */}
-        <AnimatePresence>
-          {selectedBatch && (
-            <LogTerminal logs={liveLogs} batchId={selectedBatch} onClose={() => setSelectedBatch(null)} />
-          )}
-        </AnimatePresence>
       </div>
     </div>
   );
