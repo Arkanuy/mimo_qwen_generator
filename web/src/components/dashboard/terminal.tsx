@@ -237,7 +237,7 @@ export function LogTerminal({ logs, batchId, onClose }: TerminalProps) {
                         <span className={`text-sm font-bold font-mono ${ac.text}`}>{t.id}</span>
                         {t.threadAssigned > 0 && (
                           <span className="text-[10px] text-zinc-500 font-mono">
-                            {t.threadDone}/{t.threadAssigned} of {t.total}
+                            {t.threadDone > 0 && `✓${t.threadDone} `}{t.status === "failed" && `✗`}
                           </span>
                         )}
                         {t.status === "working" && (

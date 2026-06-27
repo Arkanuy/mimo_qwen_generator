@@ -160,7 +160,7 @@ export function PublicTerminal({ logs, batchId, onClose }: Props) {
                       <div className="flex items-center gap-2 mb-1.5">
                         <Dot s={t.status} />
                         <span className={`text-sm font-bold font-mono ${ac.text}`}>{t.id}</span>
-                        {t.threadAssigned > 0 && <span className="text-[10px] text-zinc-500 font-mono">{t.threadDone}/{t.threadAssigned} of {t.total}</span>}
+                        {t.threadDone > 0 && <span className="text-[10px] text-zinc-500 font-mono">✓{t.threadDone}</span>}{t.status === "failed" && <span className="text-[10px] text-red-400/60 font-mono ml-1">✗</span>}
                         {t.status === "working" && (
                           <div className="ml-auto flex items-center gap-1">
                             {[0,150,300].map(d => <div key={d} className={`w-1 h-1 rounded-full ${ac.bar} animate-bounce`} style={{ animationDelay: `${d}ms` }} />)}

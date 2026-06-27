@@ -287,23 +287,44 @@ async function runMimoBatch(batchId, config) {
         return { ok: false };
       }
     } catch (err) {
+      const isRetryable = /captcha|CAPTCHA|unsolvable|timeout|ECONNREFUSED|ETIMEDOUT|tunnel|proxy|restrict/i.test(err.message);
+      if (isRetryable) {
+        addLog(batchId, `${tag} ⚠ Account ${idx + 1} captcha/transient error, retrying...`);
+        return { ok: false, retry: true };
+      }
       addLog(batchId, `${tag} ❌ Account ${idx + 1} error: ${err.message}`);
       batch.progress.failed++;
       saveBatchResult(batchId, { email, password: config.password, ultraspeed: false, error: err.message });
-      return { ok: false };
+      return { ok: false, retry: false };
     } finally {
       if (reg.browser) await reg.browser.close().catch(() => {});
     }
   }
 
   return new Promise((resolve) => {
+    const retryCount = new Map();
     function launchNext() {
       while (activeCount < threadCount && nextIdx < config.count && !stopped) {
         const idx = nextIdx++;
         const threadId = (idx % threadCount) + 1;
         activeCount++;
 
-        runAccount(idx, config.count, currentRef, threadId).finally(() => {
+        runAccount(idx, config.count, currentRef, threadId).then(result => {
+          if (result.retry) {
+            const retries = retryCount.get(idx) || 0;
+            if (retries < 3) {
+              retryCount.set(idx, retries + 1);
+              addLog(batchId, `[T${threadId}] ↻ Retry ${retries + 1}/3 for account ${idx + 1}`);
+              // Don't count as failed, let thread pick up next account
+              activeCount--;
+              setTimeout(launchNext, 2000);
+              return;
+            } else {
+              addLog(batchId, `[T${threadId}] ❌ Account ${idx + 1} max retries reached`);
+              batch.progress.failed++;
+            }
+          }
+        }).finally(() => {
           activeCount--;
           const b = db[batchId];
           if (!b || b.status === "stopped") stopped = true;
