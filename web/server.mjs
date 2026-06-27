@@ -640,6 +640,54 @@ const server = http.createServer(async (req, res) => {
     return res.end(json);
   }
 
+
+  // ── Tempmail proxy (so web UI can see inboxes/messages) ──
+
+  // GET /api/tempmail/session → get current session info
+  if (req.method === "GET" && url.pathname === "/api/tempmail/session") {
+    const sessionFile = join(__dirname, "..", "db", "tempmail-session.json");
+    if (existsSync(sessionFile)) {
+      return sendJSON(req, res, JSON.parse(readFileSync(sessionFile, "utf8")));
+    }
+    return sendJSON(req, res, { sessionId: null });
+  }
+
+  // GET /api/tempmail/inboxes → list inboxes for current session
+  if (req.method === "GET" && url.pathname === "/api/tempmail/inboxes") {
+    const sessionFile = join(__dirname, "..", "db", "tempmail-session.json");
+    if (!existsSync(sessionFile)) return sendJSON(req, res, []);
+    const { sessionId } = JSON.parse(readFileSync(sessionFile, "utf8"));
+    const tempmailUrl = "https://tempik.hindiabelanda.my.id/api";
+    try {
+      const r = await fetch(`${tempmailUrl}/inboxes`, {
+        headers: { "Content-Type": "application/json", "x-session-id": sessionId }
+      });
+      const data = await r.json();
+      return sendJSON(req, res, data);
+    } catch (e) {
+      return sendJSON(req, res, { error: e.message }, 500);
+    }
+  }
+
+  // GET /api/tempmail/messages?addr=xxx → get messages for an inbox
+  if (req.method === "GET" && url.pathname === "/api/tempmail/messages") {
+    const addr = url.searchParams.get("addr");
+    if (!addr) return sendJSON(req, res, { error: "addr required" }, 400);
+    const sessionFile = join(__dirname, "..", "db", "tempmail-session.json");
+    if (!existsSync(sessionFile)) return sendJSON(req, res, []);
+    const { sessionId } = JSON.parse(readFileSync(sessionFile, "utf8"));
+    const tempmailUrl = "https://tempik.hindiabelanda.my.id/api";
+    try {
+      const r = await fetch(`${tempmailUrl}/inboxes/${encodeURIComponent(addr)}/messages`, {
+        headers: { "Content-Type": "application/json", "x-session-id": sessionId }
+      });
+      const data = await r.json();
+      return sendJSON(req, res, data);
+    } catch (e) {
+      return sendJSON(req, res, { error: e.message }, 500);
+    }
+  }
+
   res.writeHead(404);
   res.end("Not found");
 });

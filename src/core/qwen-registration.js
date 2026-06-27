@@ -1,7 +1,6 @@
 /**
  * QwenCloud auto-signup + API key extractor.
  * Node.js port of qwencloud_full.py.
- *
  * Uses tempmail API (same as MiMo) for email verification.
  */
 
@@ -37,15 +36,44 @@ export class QwenRegistration extends EventEmitter {
 
   log(msg) { this.emit('log', msg); }
 
-  // ── Tempmail API (same as MiMo) ──────────────────────
+  // ── Tempmail API ─────────────────────────────────────
   async _initTempmailSession() {
     if (this.tempmailSession) return this.tempmailSession;
+
+    // Try to load persisted session (shared with MiMo runner)
+    try {
+      const fs = await import('fs');
+      const path = await import('path');
+      const { fileURLToPath } = await import('url');
+      const __dirname = path.dirname(fileURLToPath(import.meta.url));
+      const sessionFile = path.join(__dirname, '..', '..', 'db', 'tempmail-session.json');
+      if (fs.existsSync(sessionFile)) {
+        const data = JSON.parse(fs.readFileSync(sessionFile, 'utf8'));
+        if (data.sessionId) {
+          this.tempmailSession = data.sessionId;
+          return this.tempmailSession;
+        }
+      }
+    } catch {}
+
     const res = await fetch(`${this.tempmailUrl}/session`, {
       headers: { 'Content-Type': 'application/json' }
     });
     if (!res.ok) throw new Error(`Tempmail session failed: ${res.status}`);
     const data = await res.json();
     this.tempmailSession = data.sessionId || data.id || data.session_id;
+
+    // Persist session for web UI visibility
+    try {
+      const fs = await import('fs');
+      const path = await import('path');
+      const { fileURLToPath } = await import('url');
+      const __dirname = path.dirname(fileURLToPath(import.meta.url));
+      const sessionFile = path.join(__dirname, '..', '..', 'db', 'tempmail-session.json');
+      fs.mkdirSync(path.dirname(sessionFile), { recursive: true });
+      fs.writeFileSync(sessionFile, JSON.stringify({ sessionId: this.tempmailSession, saved_at: new Date().toISOString() }));
+    } catch {}
+
     return this.tempmailSession;
   }
 
@@ -59,12 +87,12 @@ export class QwenRegistration extends EventEmitter {
       },
       body: JSON.stringify({}),
     });
-    if (!res.ok) throw new Error(`Tempmail inbox creation failed: ${res.status}`);
+    if (!res.ok) throw new Error(`Tempmail inbox failed: ${res.status}`);
     const data = await res.json();
     return data.address;
   }
 
-  async _pollTempmailMessages(address, timeout = 120000, interval = 5000) {
+  async _pollTempmailMessages(address, timeout = 120000, interval = 5000, afterTime = 0) {
     const headers = { 'Content-Type': 'application/json' };
     if (this.tempmailSession) headers['x-session-id'] = this.tempmailSession;
 
@@ -74,7 +102,17 @@ export class QwenRegistration extends EventEmitter {
         const res = await fetch(`${this.tempmailUrl}/inboxes/${encodeURIComponent(address)}/messages`, { headers });
         if (res.ok) {
           const messages = await res.json();
-          if (messages && messages.length > 0) return messages;
+          if (messages && messages.length > 0) {
+            // Filter: only messages received after afterTime
+            const fresh = afterTime > 0
+              ? messages.filter(m => {
+                  const t = m.received_at || m.created_at || m.date || '';
+                  if (!t) return true; // no timestamp = assume fresh
+                  return new Date(t).getTime() > afterTime;
+                })
+              : messages;
+            if (fresh.length > 0) return fresh;
+          }
         }
       } catch {}
       await sleep(interval);
@@ -84,11 +122,11 @@ export class QwenRegistration extends EventEmitter {
 
   _extractCode(messages) {
     for (const msg of messages) {
-      const content = (msg.subject || '') + ' ' + (msg.body || msg.text || '');
+      const content = (msg.subject || '') + ' ' + (msg.body || msg.text || msg.html || '');
       const patterns = [
         /verification code[:\s]+([0-9]{4,8})/i,
-        /code[:\s]+([0-9]{4,8})/i,
         /Your verification code is[:\s]+([0-9]{4,8})/i,
+        /code[:\s]+([0-9]{4,8})/i,
         /([0-9]{6})/,
       ];
       for (const p of patterns) {
@@ -137,7 +175,7 @@ export class QwenRegistration extends EventEmitter {
       await this._waitForText('Log In', 20000);
 
       const url = this.page.url();
-      this.log(`landing: ${url}`);
+      this.log(`landing: ${url.substring(0, 80)}...`);
 
       // 2. Navigate to signup
       if (url.includes('sso/login') || (await this.page.title()).includes('Log In')) {
@@ -178,6 +216,7 @@ export class QwenRegistration extends EventEmitter {
   // ── Signup Flow ──────────────────────────────────────
   async _doSignup(email, country) {
     this.log(`starting signup for ${email}`);
+    const requestTime = Date.now(); // Track when we sent the request
 
     try {
       await this.page.locator('input[placeholder="Email"]').fill(email);
@@ -187,48 +226,97 @@ export class QwenRegistration extends EventEmitter {
     }
 
     await this._waitForPageLoad(10000);
-    await sleep(500);
+    await sleep(1000);
 
     // Detect "already registered" or OTP page
-    const deadline = Date.now() + 10000;
+    const deadline = Date.now() + 15000;
     let foundOtp = false;
     while (Date.now() < deadline) {
       try {
         const body = await this.page.evaluate(() => document.body.innerText.toLowerCase());
-        if (body.includes('already') || body.includes('registered')) return { status: 'already-registered' };
-        if (body.includes('enter verification code') || body.includes('verification code')) { foundOtp = true; break; }
+        if (body.includes('already') && body.includes('registered')) return { status: 'already-registered' };
+        if (body.includes('verification code') || body.includes('enter code') || body.includes('otp')) {
+          foundOtp = true;
+          break;
+        }
+        // Check if we're on OTP page by looking for input fields
+        const inputCount = await this.page.locator('input[type="text"]').count();
+        if (inputCount >= 4) { foundOtp = true; break; }
       } catch {}
       await sleep(500);
     }
-    if (!foundOtp) return { status: 'error', reason: 'verification-code-page-not-found' };
+    if (!foundOtp) {
+      const bodyText = await this.page.evaluate(() => document.body.innerText.substring(0, 300)).catch(() => 'unknown');
+      this.log(`page text: ${bodyText.substring(0, 100)}`);
+      return { status: 'error', reason: 'verification-code-page-not-found' };
+    }
 
-    // Get verification code from tempmail
-    const code = await this._getVerificationCode(email);
+    // Get verification code — only accept emails after requestTime
+    const code = await this._getVerificationCode(email, requestTime);
     if (!code) return { status: 'error', reason: 'verification-code-not-found' };
 
-    // Type OTP
+    // Type OTP into the individual boxes or single input
     try {
-      const otpInput = this.page.locator('input[type="text"]').first();
-      await otpInput.waitFor({ state: 'visible', timeout: 10000 });
-      await otpInput.click();
-      await sleep(300);
-      await this.page.keyboard.press('Control+a');
-      await this.page.keyboard.press('Delete');
-      await sleep(300);
-      await otpInput.pressSequentially(code, { delay: 50 });
+      // Try individual OTP boxes first (QwenCloud uses 6 separate inputs)
+      const otpInputs = this.page.locator('input[type="text"]');
+      const count = await otpInputs.count();
+      if (count >= 6) {
+        for (let i = 0; i < 6; i++) {
+          await otpInputs.nth(i).click();
+          await sleep(100);
+          await otpInputs.nth(i).pressSequentially(code[i], { delay: 50 });
+          await sleep(100);
+        }
+      } else {
+        // Single input fallback
+        const otpInput = otpInputs.first();
+        await otpInput.waitFor({ state: 'visible', timeout: 10000 });
+        await otpInput.click();
+        await sleep(300);
+        await this.page.keyboard.press('Control+a');
+        await this.page.keyboard.press('Delete');
+        await sleep(300);
+        await otpInput.pressSequentially(code, { delay: 80 });
+      }
+      this.log(`OTP entered: ${code}`);
     } catch (e) {
       return { status: 'error', reason: `otp-fill-failed: ${e.message}` };
     }
 
-    // Wait for country page
-    try { await this._waitForText('Please select your country/region', 10000); } catch {
+    await sleep(2000);
+
+    // Try clicking Validate if present
+    try {
+      const validateBtn = this.page.locator('button:has-text("Validate")');
+      if (await validateBtn.count() > 0 && !(await validateBtn.isDisabled())) {
+        await validateBtn.click();
+        this.log('Validate clicked');
+      }
+    } catch {}
+
+    // Wait for country page or dashboard
+    let onCountryPage = false;
+    const countryDeadline = Date.now() + 20000;
+    while (Date.now() < countryDeadline) {
       try {
-        const validateBtn = this.page.locator('button:has-text("Validate")');
-        if (await validateBtn.count() > 0 && !(await validateBtn.isDisabled())) {
-          await validateBtn.click();
-          await this._waitForText('Please select your country/region', 10000);
+        const body = await this.page.evaluate(() => document.body.innerText.toLowerCase());
+        if (body.includes('select your country') || body.includes('country/region')) {
+          onCountryPage = true;
+          break;
+        }
+        if (body.includes('dashboard') || body.includes('api key') || body.includes('welcome')) {
+          // Already on dashboard — skip country
+          this.log('reached dashboard directly');
+          return { status: 'signup-ok' };
         }
       } catch {}
+      await sleep(1000);
+    }
+
+    if (!onCountryPage) {
+      const bodyText = await this.page.evaluate(() => document.body.innerText.substring(0, 300)).catch(() => 'unknown');
+      this.log(`after OTP page: ${bodyText.substring(0, 100)}`);
+      return { status: 'error', reason: 'country-page-not-found' };
     }
 
     // Select country
@@ -248,7 +336,9 @@ export class QwenRegistration extends EventEmitter {
     // Click Continue
     try {
       const continueBtn = this.page.locator('button:has-text("Continue")');
-      if (!(await continueBtn.isDisabled())) await continueBtn.click();
+      if (await continueBtn.count() > 0 && !(await continueBtn.isDisabled())) {
+        await continueBtn.click();
+      }
     } catch (e) {
       return { status: 'error', reason: `continue-click-failed: ${e.message}` };
     }
@@ -268,6 +358,8 @@ export class QwenRegistration extends EventEmitter {
   // ── Login Flow ───────────────────────────────────────
   async _doLogin(email) {
     this.log(`login for ${email}`);
+    const requestTime = Date.now();
+
     try {
       await this.page.getByRole('textbox', { name: 'Email' }).fill(email);
       await sleep(500);
@@ -288,7 +380,7 @@ export class QwenRegistration extends EventEmitter {
       return { status: 'error', reason: `login-fill-failed: ${e.message}` };
     }
 
-    const code = await this._getVerificationCode(email);
+    const code = await this._getVerificationCode(email, requestTime);
     if (!code) return { status: 'error', reason: 'login-verification-code-not-found' };
 
     try {
@@ -321,10 +413,10 @@ export class QwenRegistration extends EventEmitter {
   }
 
   // ── Verification Code ────────────────────────────────
-  async _getVerificationCode(email) {
+  async _getVerificationCode(email, afterTime = 0) {
     this.log(`polling tempmail for verification code...`);
     try {
-      const messages = await this._pollTempmailMessages(email, 90000, 5000);
+      const messages = await this._pollTempmailMessages(email, 90000, 5000, afterTime);
       const code = this._extractCode(messages);
       if (code) this.log(`verification code: ${code}`);
       return code;
@@ -367,7 +459,6 @@ export class QwenRegistration extends EventEmitter {
       await desc.fill(description);
     } catch (e) { this.log(`desc fill failed: ${e.message}`); return null; }
 
-    // Wait for Generate Key enabled
     const genDeadline = Date.now() + 10000;
     while (Date.now() < genDeadline) {
       try { if (!(await this.page.locator('button:has-text("Generate Key")').isDisabled())) break; }
@@ -404,14 +495,58 @@ export class QwenRegistration extends EventEmitter {
   // ── Country Selection ────────────────────────────────
   async _selectCountry(country) {
     this.log(`selecting country: ${country}`);
-    try {
-      const input = this.page.locator('input[placeholder="Select your country/region"]');
-      await input.click();
-      await sleep(500);
-      await input.fill(country);
-      await sleep(500);
-    } catch (e) { this.log(`country input failed: ${e.message}`); return false; }
 
+    // Try multiple selectors
+    const selectors = [
+      'input[placeholder="Select your country/region"]',
+      'input[placeholder*="country"]',
+      'input[placeholder*="region"]',
+      'input[role="combobox"]',
+    ];
+
+    let inputFound = false;
+    for (const sel of selectors) {
+      try {
+        const el = this.page.locator(sel);
+        if (await el.count() > 0) {
+          await el.first().click();
+          await sleep(500);
+          await el.first().fill(country);
+          await sleep(500);
+          inputFound = true;
+          break;
+        }
+      } catch {}
+    }
+
+    if (!inputFound) {
+      // JS fallback — click any combobox-like element
+      try {
+        const clicked = await this.page.evaluate(() => {
+          const inputs = Array.from(document.querySelectorAll('input'));
+          const combo = inputs.find(i =>
+            i.placeholder?.toLowerCase().includes('country') ||
+            i.placeholder?.toLowerCase().includes('region') ||
+            i.getAttribute('role') === 'combobox'
+          );
+          if (combo) { combo.click(); return true; }
+          return false;
+        });
+        if (clicked) {
+          await sleep(500);
+          await this.page.keyboard.type(country, { delay: 50 });
+          await sleep(500);
+          inputFound = true;
+        }
+      } catch {}
+    }
+
+    if (!inputFound) {
+      this.log('country input not found');
+      return false;
+    }
+
+    // Click the option
     try {
       const opt = this.page.locator(`[role="option"]:has-text("${country}")`);
       await opt.waitFor({ state: 'visible', timeout: 10000 });

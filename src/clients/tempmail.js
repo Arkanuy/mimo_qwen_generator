@@ -7,9 +7,17 @@
  *   GET  /api/inboxes/{addr}/messages → [ { subject, body, from_address, received_at } ]
  *
  * Auth: x-session-id header setelah session dibuat.
+ * Session di-persist ke file supaya bisa di-share dengan web UI.
  */
 
 import fetch from 'node-fetch';
+import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const SESSION_FILE = join(__dirname, '..', '..', 'db', 'tempmail-session.json');
 
 class TempmailClient {
   constructor(apiUrl) {
@@ -17,8 +25,33 @@ class TempmailClient {
     this.sessionId = null;
   }
 
+  _loadSession() {
+    try {
+      if (existsSync(SESSION_FILE)) {
+        const data = JSON.parse(readFileSync(SESSION_FILE, 'utf8'));
+        if (data.sessionId) return data.sessionId;
+      }
+    } catch {}
+    return null;
+  }
+
+  _saveSession(sid) {
+    try {
+      const dir = dirname(SESSION_FILE);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(SESSION_FILE, JSON.stringify({ sessionId: sid, saved_at: new Date().toISOString() }), 'utf8');
+    } catch {}
+  }
+
   async initSession() {
     if (this.sessionId) return this.sessionId;
+
+    // Try to reuse persisted session first
+    const saved = this._loadSession();
+    if (saved) {
+      this.sessionId = saved;
+      return this.sessionId;
+    }
 
     const response = await fetch(`${this.apiUrl}/session`, {
       method: 'GET',
@@ -31,6 +64,7 @@ class TempmailClient {
 
     const data = await response.json();
     this.sessionId = data.sessionId || data.id || data.session_id;
+    this._saveSession(this.sessionId);
     return this.sessionId;
   }
 
@@ -43,7 +77,7 @@ class TempmailClient {
         'Content-Type': 'application/json',
         'x-session-id': this.sessionId
       },
-      body: JSON.stringify({})  // kosongkan untuk random inbox
+      body: JSON.stringify({})
     });
 
     if (!response.ok) {
@@ -54,14 +88,15 @@ class TempmailClient {
     return data.address;
   }
 
-  async getMessages(address, maxWait = 120000, interval = 5000) {
+  async getMessages(address, maxWait = 180000, interval = 5000) {
+    await this.initSession();
     const startTime = Date.now();
 
     while (Date.now() - startTime < maxWait) {
-      const headers = { 'Content-Type': 'application/json' };
-      if (this.sessionId) {
-        headers['x-session-id'] = this.sessionId;
-      }
+      const headers = {
+        'Content-Type': 'application/json',
+        'x-session-id': this.sessionId
+      };
 
       try {
         const response = await fetch(`${this.apiUrl}/inboxes/${address}/messages`, {
@@ -93,11 +128,11 @@ class TempmailClient {
       const body = msg.body || msg.text || '';
       const content = subject + ' ' + body;
 
-      // Common verification code patterns
       const patterns = [
         /verification code[:\s]+([0-9]{4,8})/i,
+        /Your verification code is[:\s]+([0-9]{4,8})/i,
         /code[:\s]+([0-9]{4,8})/i,
-        /([0-9]{6})/,  // 6-digit code
+        /([0-9]{6})/,
       ];
 
       for (const pattern of patterns) {

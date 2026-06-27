@@ -27,3 +27,4 @@ __pycache__/
 # Panic logs
 next-panic-*.log
 config/default.json
+db/tempmail-session.json
