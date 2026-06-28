@@ -2,10 +2,10 @@
 
 import { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Play, Settings, Loader2, Monitor, Eye, ChevronDown, ChevronUp, Zap, Cloud, Globe } from "lucide-react";
+import { Play, Settings, Loader2, Monitor, Eye, ChevronDown, ChevronUp, Zap, Globe } from "lucide-react";
 
 interface BatchConfig {
-  generator: "mimo" | "qwencloud";
+  generator: "mimo";
   count: number;
   headless: boolean;
   threads: number;
@@ -61,10 +61,6 @@ function CustomSelect({ value, onChange, options }: {
 }
 
 /* ── Generator Toggle ──────────────────────────────── */
-function GeneratorToggle({ value, onChange }: { value: string; onChange: (v: string) => void }) {
-  return (
-    <div className="flex items-center bg-muted/30 border border-border/40 rounded-xl overflow-hidden">
-      <button type="button" onClick={() => onChange("mimo")}
         className={`flex items-center gap-1.5 px-3 h-10 text-xs font-medium transition-colors ${
           value === "mimo" ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
         }`}>
@@ -107,12 +103,6 @@ export function ConfigPanel({ onStart, isRunning }: ConfigPanelProps) {
 
   return (
     <div className="space-y-4">
-      {/* Generator Toggle */}
-      <div className="space-y-1.5">
-        <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Generator</label>
-        <GeneratorToggle value={config.generator} onChange={v => update("generator", v as "mimo" | "qwencloud")} />
-      </div>
-
       {/* Primary Controls */}
       <div className={`grid grid-cols-2 sm:grid-cols-3 ${isMimo ? "lg:grid-cols-5" : "lg:grid-cols-4"} gap-3`}>
         {/* Account Count */}

@@ -3,7 +3,7 @@
 import { useState, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import { getMe } from "@/lib/auth";
-import { Key, Download, Copy, Check, Trash2, Search, ArrowLeft } from "lucide-react";
+import { Key, Download, Copy, Check, Search, ArrowLeft } from "lucide-react";
 
 interface MasterKey {
   email: string;
@@ -35,7 +35,7 @@ export default function KeysPage() {
     try {
       const res = await fetch("/api/master-keys");
       const data = await res.json();
-      setKeys(data.keys || []);
+      setKeys((data.keys || []).filter((k: MasterKey) => k.provider === "mimo"));
     } catch {}
     setLoading(false);
   };
@@ -62,7 +62,6 @@ export default function KeysPage() {
   return (
     <div className="min-h-screen bg-background text-foreground p-6">
       <div className="max-w-6xl mx-auto space-y-6">
-        {/* Header */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <button onClick={() => router.push("/")} className="p-2 rounded-lg hover:bg-muted transition-colors">
@@ -70,7 +69,7 @@ export default function KeysPage() {
             </button>
             <Key className="w-6 h-6" />
             <h1 className="text-xl font-semibold">Master API Keys</h1>
-            <span className="text-sm text-muted-foreground">({filteredKeys.length} keys)</span>
+            <span className="text-sm text-muted-foreground">({filteredKeys.length} MiMo keys)</span>
           </div>
           <div className="flex items-center gap-2">
             <button onClick={copyAll} className="flex items-center gap-1.5 px-3 py-2 text-sm rounded-lg bg-muted hover:bg-muted/80 transition-colors">
@@ -86,7 +85,6 @@ export default function KeysPage() {
           </div>
         </div>
 
-        {/* Search */}
         <div className="relative">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
           <input
@@ -98,11 +96,10 @@ export default function KeysPage() {
           />
         </div>
 
-        {/* Table */}
         {loading ? (
           <div className="text-center py-20 text-muted-foreground">Loading...</div>
         ) : filteredKeys.length === 0 ? (
-          <div className="text-center py-20 text-muted-foreground">No API keys found</div>
+          <div className="text-center py-20 text-muted-foreground">No MiMo API keys found. Run a batch first.</div>
         ) : (
           <div className="rounded-xl border border-border/50 overflow-hidden">
             <table className="w-full text-sm">
@@ -111,7 +108,6 @@ export default function KeysPage() {
                   <th className="text-left px-4 py-3 font-medium text-muted-foreground">#</th>
                   <th className="text-left px-4 py-3 font-medium text-muted-foreground">Email</th>
                   <th className="text-left px-4 py-3 font-medium text-muted-foreground">API Key</th>
-                  <th className="text-left px-4 py-3 font-medium text-muted-foreground">Provider</th>
                   <th className="text-left px-4 py-3 font-medium text-muted-foreground">Created</th>
                   <th className="text-right px-4 py-3 font-medium text-muted-foreground">Action</th>
                 </tr>
@@ -123,11 +119,6 @@ export default function KeysPage() {
                     <td className="px-4 py-2.5 font-mono text-xs">{k.email}</td>
                     <td className="px-4 py-2.5 font-mono text-xs">
                       <span className="text-foreground/80">{k.apiKey.substring(0, 12)}...{k.apiKey.substring(k.apiKey.length - 6)}</span>
-                    </td>
-                    <td className="px-4 py-2.5">
-                      <span className={`text-xs px-2 py-0.5 rounded-full ${k.provider === "mimo" ? "bg-blue-500/10 text-blue-400" : "bg-purple-500/10 text-purple-400"}`}>
-                        {k.provider}
-                      </span>
                     </td>
                     <td className="px-4 py-2.5 text-xs text-muted-foreground">
                       {new Date(k.created_at).toLocaleString()}

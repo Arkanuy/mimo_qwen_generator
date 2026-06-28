@@ -674,33 +674,88 @@ const server = http.createServer(async (req, res) => {
     return sendJSON(req, res, { keys: successKeys, total: successKeys.length });
   }
 
-  // Checker API — validate API keys
+  // Checker API — check MiMo account balance using cookies + Playwright
   if (req.method === "POST" && url.pathname === "/api/checker") {
     if (!isAdmin(req)) return sendJSON(req, res, { error: "Unauthorized" }, 401);
     const body = await parseBody(req);
-    const keysToCheck = body.keys || [];
+    const accounts = body.accounts || [];
     const results = [];
-    // Check each key by hitting the MiMo API
-    for (const item of keysToCheck) {
-      const apiKey = typeof item === "string" ? item : item.apiKey;
-      if (!apiKey) { results.push({ apiKey, status: "invalid", error: "empty key" }); continue; }
+
+    const { chromium } = await import('playwright');
+
+    for (const acct of accounts) {
+      const { email, apiKey, cookies } = acct;
+      if (!cookies?.passToken || !cookies?.cUserId || !cookies?.userId) {
+        results.push({ email, status: "Error", error: "Missing cookie fields (need passToken, cUserId, userId)", balance: null, gift: null, frozen: null, cash: null });
+        continue;
+      }
+      let browser = null;
       try {
-        const resp = await fetch("https://api.xiaomimimo.com/v1/models", {
-          headers: { "Authorization": `Bearer ${apiKey}` },
-          signal: AbortSignal.timeout(10000),
+        browser = await chromium.launch({ headless: true, channel: "chrome", args: ["--disable-blink-features=AutomationControlled"] });
+        const ctx = await browser.newContext();
+        await ctx.addCookies([
+          { name: "passToken", value: cookies.passToken, domain: ".xiaomimimo.com", path: "/" },
+          { name: "cUserId", value: cookies.cUserId, domain: ".xiaomimimo.com", path: "/" },
+          { name: "userId", value: cookies.userId, domain: ".xiaomimimo.com", path: "/" },
+        ]);
+        const page = await ctx.newPage();
+        await page.goto("https://platform.xiaomimimo.com/console/balance", { waitUntil: "domcontentloaded", timeout: 20000 });
+        await page.waitForTimeout(3000);
+
+        const balanceData = await page.evaluate(() => {
+          const text = document.body.innerText || "";
+          // Parse balance from page text
+          const lines = text.split(/\r?\n/);
+          let balance = null, gift = null, frozen = null, cash = null;
+
+          // Look for total balance
+          for (let i = 0; i < lines.length - 1; i++) {
+            const line = lines[i].trim();
+            if (/^balance$/i.test(line)) {
+              for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
+                const m = lines[j].match(/\$\s*([0-9]+\.[0-9]{2})/);
+                if (m) { balance = parseFloat(m[1]); break; }
+              }
+            }
+          }
+
+          // Cash and bonus/gift
+          const cashM = text.match(/cash\s+balance\s*[:\s]*\$\s*([0-9]+\.[0-9]{2})/i);
+          const bonusM = text.match(/bonus\s+balance\s*[:\s]*\$\s*([0-9]+\.[0-9]{2})/i);
+          if (cashM) cash = parseFloat(cashM[1]);
+          if (bonusM) gift = parseFloat(bonusM[1]);
+          if (balance === null && cash !== null && gift !== null) balance = cash + gift;
+          if (balance === null) {
+            // Fallback: smallest $X.XX < $50
+            const all = [...text.matchAll(/\$\s*([0-9]+\.[0-9]{2})/g)].map(m => parseFloat(m[1])).filter(n => n > 0 && n < 50);
+            if (all.length > 0) balance = Math.min(...all);
+          }
+
+          return { balance, gift, frozen, cash };
         });
-        if (resp.ok) {
-          results.push({ apiKey, status: "valid", code: resp.status });
-        } else if (resp.status === 401 || resp.status === 403) {
-          results.push({ apiKey, status: "invalid", code: resp.status });
+
+        if (balanceData.balance !== null) {
+          results.push({ email, status: "OK", ...balanceData, apiKey: apiKey?.substring(0, 12) + "..." });
         } else {
-          results.push({ apiKey, status: "unknown", code: resp.status });
+          // Check if page is login/redirect
+          const url = page.url();
+          if (url.includes("login") || url.includes("sso")) {
+            results.push({ email, status: "Error", error: "Session expired (redirected to login)", balance: null, gift: null, frozen: null, cash: null });
+          } else {
+            results.push({ email, status: "Error", error: "Could not parse balance from page", balance: null, gift: null, frozen: null, cash: null });
+          }
         }
       } catch (e) {
-        results.push({ apiKey, status: "error", error: e.message });
+        results.push({ email, status: "Error", error: e.message, balance: null, gift: null, frozen: null, cash: null });
+      } finally {
+        if (browser) await browser.close().catch(() => {});
       }
     }
-    return sendJSON(req, res, { results, checked: results.length });
+    const totalBalance = results.filter(r => r.balance != null).reduce((s, r) => s + (parseFloat(r.balance) || 0), 0);
+    const totalGift = results.filter(r => r.gift != null).reduce((s, r) => s + (parseFloat(r.gift) || 0), 0);
+    const okCount = results.filter(r => r.status === "OK").length;
+    const errCount = results.filter(r => r.status === "Error").length;
+    return sendJSON(req, res, { results, totalBalance, totalGift, okCount, errCount, checked: results.length });
   }
 
   // Download master keys as txt or json
@@ -731,7 +786,12 @@ const server = http.createServer(async (req, res) => {
     setStatus(batch.id, "running");
     const proxyInfo = parseProxyList(config.proxies || "").length;
     addLog(batch.id, `Started — ${config.count} accounts, headless: ${config.headless}, threads: ${config.threads || 1}, generator: ${config.generator || "mimo"}${proxyInfo ? `, proxies: ${proxyInfo}` : ""}`);
-    runBatch(batch.id, config).catch(err => { addLog(batch.id, `Fatal: ${err.message}`); setStatus(batch.id, "error"); });
+    if (config.generator === "qwencloud") {
+      addLog(batch.id, '⚠ QwenCloud generator is disabled. Use MiMo instead.');
+      setStatus(batch.id, "error");
+    } else {
+      runBatch(batch.id, config).catch(err => { addLog(batch.id, `Fatal: ${err.message}`); setStatus(batch.id, "error"); });
+    }
     return sendJSON(req, res, batch);
   }
   if (req.method === "PATCH" && url.pathname === "/api/batch") {
