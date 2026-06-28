@@ -674,129 +674,50 @@ const server = http.createServer(async (req, res) => {
     return sendJSON(req, res, { keys: successKeys, total: successKeys.length });
   }
 
-  // Checker API — check MiMo balance via external checker API
+  // Checker API — submit to external checker, return queue_id immediately
   if (req.method === "POST" && url.pathname === "/api/checker") {
     if (!isAdmin(req)) return sendJSON(req, res, { error: "Unauthorized" }, 401);
     const body = await parseBody(req);
     let accounts = body.accounts || [];
 
-    // Auto-load from master keys if no accounts provided
     if (accounts.length === 0) {
       const masterKeys = loadMasterKeys().filter(k => k.provider === "mimo");
       accounts = masterKeys;
     }
-
     if (accounts.length === 0) {
-      return sendJSON(req, res, { error: "No accounts found.", results: [], totalBalance: 0, totalGift: 0, okCount: 0, errCount: 0, checked: 0 });
+      return sendJSON(req, res, { error: "No accounts found." });
     }
 
-    const CHECKER_API = "https://apikey.jimixz.tech/api/check";
-    const STATUS_API = "https://apikey.jimixz.tech/api/status";
-
-    // Filter valid accounts
-    const validAccounts = accounts.filter(a =>
-      a.email && a.cookies?.passToken && a.cookies?.cUserId && a.cookies?.userId
-    );
+    const validAccounts = accounts.filter(a => a.email && a.cookies?.passToken && a.cookies?.cUserId && a.cookies?.userId);
     if (validAccounts.length === 0) {
-      return sendJSON(req, res, { error: "No valid accounts.", results: [], totalBalance: 0, totalGift: 0, okCount: 0, errCount: accounts.length, checked: 0 });
+      return sendJSON(req, res, { error: "No valid accounts (need email + cookies)" });
     }
 
     try {
-      console.log(`[Checker] Sending ${validAccounts.length} accounts`);
-
-      const submitResp = await fetch(CHECKER_API, {
+      console.log(`[Checker] Submitting ${validAccounts.length} accounts`);
+      const resp = await fetch("https://apikey.jimixz.tech/api/check", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           accounts: validAccounts.map(a => ({
-            email: a.email,
-            password: a.password || "",
-            apiKey: a.apiKey || "",
-            cookies: {
-              passToken: a.cookies.passToken,
-              cUserId: a.cookies.cUserId,
-              userId: a.cookies.userId,
-            },
-            provider: a.provider || "mimo",
-            created_at: a.created_at || new Date().toISOString(),
+            email: a.email, password: a.password || "", apiKey: a.apiKey || "",
+            cookies: { passToken: a.cookies.passToken, cUserId: a.cookies.cUserId, userId: a.cookies.userId },
+            provider: a.provider || "mimo", created_at: a.created_at || new Date().toISOString(),
           })),
         }),
         signal: AbortSignal.timeout(30000),
       });
-
-      if (!submitResp.ok) {
-        const errText = await submitResp.text().catch(() => "unknown");
-        return sendJSON(req, res, { error: `API ${submitResp.status}: ${errText.substring(0, 200)}`, results: [], totalBalance: 0, totalGift: 0, okCount: 0, errCount: validAccounts.length, checked: 0 });
+      if (!resp.ok) {
+        const errText = await resp.text().catch(() => "unknown");
+        return sendJSON(req, res, { error: `API ${resp.status}: ${errText.substring(0, 200)}` });
       }
-
-      let submitData;
-      try { submitData = await submitResp.json(); } catch {
-        return sendJSON(req, res, { error: "Non-JSON response from checker API", results: [], totalBalance: 0, totalGift: 0, okCount: 0, errCount: validAccounts.length, checked: 0 });
-      }
-
-      const queueId = submitData.task_id || submitData.queue_id || submitData.id;
+      const data = await resp.json();
+      const queueId = data.task_id || data.queue_id || data.id;
       console.log(`[Checker] Queue: ${queueId}`);
-
-      if (!queueId) {
-        return sendJSON(req, res, { error: "No task_id", raw: JSON.stringify(submitData).substring(0, 300), results: [], totalBalance: 0, totalGift: 0, okCount: 0, errCount: validAccounts.length, checked: 0 });
-      }
-
-      // Poll for results
-      let results = null;
-      for (let i = 0; i < 90; i++) {
-        await new Promise(r => setTimeout(r, 2000));
-        try {
-          const statusResp = await fetch(`${STATUS_API}/${queueId}`, {
-            headers: { "Accept": "application/json" },
-            signal: AbortSignal.timeout(10000),
-          });
-          if (!statusResp.ok) { console.log(`[Checker] Poll ${i+1}: HTTP ${statusResp.status}`); continue; }
-          const statusData = await statusResp.json();
-          console.log(`[Checker] Poll ${i+1}: status=${statusData.status}`);
-
-          if (statusData.status === "done" || statusData.status === "completed") {
-            results = statusData.results || [];
-            break;
-          }
-          if (statusData.status === "failed" || statusData.status === "error") {
-            return sendJSON(req, res, { error: `Checker failed: ${statusData.error || "unknown"}`, results: [], totalBalance: 0, totalGift: 0, okCount: 0, errCount: validAccounts.length, checked: 0 });
-          }
-        } catch { continue; }
-      }
-
-      if (!results) {
-        return sendJSON(req, res, { error: "Checker timeout (180s)", results: [], totalBalance: 0, totalGift: 0, okCount: 0, errCount: validAccounts.length, checked: 0 });
-      }
-
-      // Normalize results — API uses different field names
-      const normalized = results.map(r => {
-        const bal = parseFloat(r.balance) || 0;
-        const gift = parseFloat(r.giftBalance ?? r.gift ?? 0) || 0;
-        const frozen = parseFloat(r.frozenBalance ?? r.frozen ?? 0) || 0;
-        const cash = parseFloat(r.cashBalance ?? r.cash ?? 0) || 0;
-        const statusRaw = (r.status || "").toLowerCase();
-        return {
-          email: r.email,
-          status: statusRaw === "ok" ? "OK" : "Error",
-          balance: bal || null,
-          gift: gift || null,
-          frozen: frozen || null,
-          cash: cash || null,
-          error: r.error || null,
-        };
-      });
-
-      const totalBalance = normalized.reduce((s, r) => s + (parseFloat(r.balance) || 0), 0);
-      const totalGift = normalized.reduce((s, r) => s + (parseFloat(r.gift) || 0), 0);
-      const okCount = normalized.filter(r => r.status === "OK").length;
-      const errCount = normalized.filter(r => r.status === "Error").length;
-
-      console.log(`[Checker] Done: ${okCount} OK, ${errCount} Error, $${totalBalance.toFixed(2)} total`);
-      return sendJSON(req, res, { results: normalized, totalBalance, totalGift, okCount, errCount, checked: normalized.length });
-
+      if (!queueId) return sendJSON(req, res, { error: "No task_id", raw: JSON.stringify(data).substring(0, 300) });
+      return sendJSON(req, res, { queueId, total: validAccounts.length });
     } catch (e) {
-      console.error(`[Checker] Fatal: ${e.message}`);
-      return sendJSON(req, res, { error: e.message, results: [], totalBalance: 0, totalGift: 0, okCount: 0, errCount: validAccounts.length, checked: 0 });
+      return sendJSON(req, res, { error: e.message });
     }
   }
 
