@@ -674,7 +674,7 @@ const server = http.createServer(async (req, res) => {
     return sendJSON(req, res, { keys: successKeys, total: successKeys.length });
   }
 
-  // Checker API — check MiMo account balance using HTTP + cookies
+  // Checker API — check MiMo balance via /api/v1/user/balance with cookies
   if (req.method === "POST" && url.pathname === "/api/checker") {
     if (!isAdmin(req)) return sendJSON(req, res, { error: "Unauthorized" }, 401);
     const body = await parseBody(req);
@@ -684,27 +684,23 @@ const server = http.createServer(async (req, res) => {
     for (const acct of accounts) {
       const { email, apiKey, cookies } = acct;
       if (!cookies?.passToken || !cookies?.cUserId || !cookies?.userId) {
-        results.push({ email, status: "Error", error: "Missing cookie fields", balance: null, gift: null, frozen: null, cash: null });
+        results.push({ email, status: "Error", error: "Missing cookie fields (need passToken, cUserId, userId)", balance: null, gift: null, frozen: null, cash: null });
         continue;
       }
       try {
         const cookieStr = `passToken=${cookies.passToken}; cUserId=${cookies.cUserId}; userId=${cookies.userId}`;
-        // Hit the balance page with cookies
-        const resp = await fetch("https://platform.xiaomimimo.com/console/balance", {
+        const resp = await fetch("https://platform.xiaomimimo.com/api/v1/user/balance", {
           headers: {
             "Cookie": cookieStr,
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept": "application/json",
+            "Referer": "https://platform.xiaomimimo.com/console/balance",
           },
-          redirect: "follow",
           signal: AbortSignal.timeout(15000),
         });
 
-        const html = await resp.text();
-
-        // Check for login redirect or error
-        if (html.includes("sso/login") || html.includes("Sign In") || resp.url?.includes("login")) {
-          results.push({ email, status: "Error", error: "Session expired", balance: null, gift: null, frozen: null, cash: null });
+        if (resp.status === 401) {
+          results.push({ email, status: "Error", error: "Session expired (401) — cookies need refresh", balance: null, gift: null, frozen: null, cash: null });
           continue;
         }
 
@@ -713,33 +709,28 @@ const server = http.createServer(async (req, res) => {
           continue;
         }
 
-        // Parse balance from HTML — strip tags, find $X.XX patterns
-        const text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
-        let balance = null, gift = null, frozen = null, cash = null;
+        const text = await resp.text();
 
-        // Look for "Balance" label followed by dollar amount
-        const balM = text.match(/Balance[^$]*\$\s*([0-9]+\.[0-9]{2})/i);
-        if (balM) balance = parseFloat(balM[1]);
-
-        const cashM = text.match(/cash\s*balance[^$]*\$\s*([0-9]+\.[0-9]{2})/i);
-        if (cashM) cash = parseFloat(cashM[1]);
-
-        const bonusM = text.match(/bonus\s*balance[^$]*\$\s*([0-9]+\.[0-9]{2})/i);
-        if (bonusM) gift = parseFloat(bonusM[1]);
-
-        if (balance === null && cash !== null && gift !== null) balance = cash + gift;
-
-        // Fallback: smallest $X.XX < $50
-        if (balance === null) {
-          const all = [...text.matchAll(/\$([0-9]+\.[0-9]{2})/g)]
-            .map(m => parseFloat(m[1])).filter(n => n > 0 && n < 50);
-          if (all.length > 0) balance = Math.min(...all);
+        // Check if response is JSON
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch {
+          // Response is HTML (SPA fallback) — session valid but wrong endpoint
+          results.push({ email, status: "Error", error: "API returned HTML instead of JSON", balance: null, gift: null, frozen: null, cash: null });
+          continue;
         }
 
-        if (balance !== null) {
-          results.push({ email, status: "OK", balance, gift, frozen, cash, apiKey: apiKey?.substring(0, 12) + "..." });
+        // Parse balance data from JSON response
+        const balance = data.balance ?? data.totalBalance ?? data.data?.balance ?? data.data?.totalBalance ?? null;
+        const gift = data.gift ?? data.giftBalance ?? data.data?.gift ?? data.data?.giftBalance ?? null;
+        const frozen = data.frozen ?? data.frozenBalance ?? data.data?.frozen ?? null;
+        const cash = data.cash ?? data.cashBalance ?? data.data?.cash ?? null;
+
+        if (balance !== null || gift !== null) {
+          results.push({ email, status: "OK", balance: balance ?? 0, gift: gift ?? 0, frozen: frozen ?? 0, cash: cash ?? 0, apiKey: apiKey?.substring(0, 12) + "..." });
         } else {
-          results.push({ email, status: "Error", error: "Could not parse balance (page may need JS)", balance: null, gift: null, frozen: null, cash: null });
+          results.push({ email, status: "Error", error: "Balance not found in response", balance: null, gift: null, frozen: null, cash: null, _raw: JSON.stringify(data).substring(0, 200) });
         }
       } catch (e) {
         results.push({ email, status: "Error", error: e.message?.substring(0, 100), balance: null, gift: null, frozen: null, cash: null });
