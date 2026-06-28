@@ -674,7 +674,7 @@ const server = http.createServer(async (req, res) => {
     return sendJSON(req, res, { keys: successKeys, total: successKeys.length });
   }
 
-  // Checker API — check MiMo account balance using cookies + Playwright
+  // Checker API — check MiMo account balance using single browser + multi-context
   if (req.method === "POST" && url.pathname === "/api/checker") {
     if (!isAdmin(req)) return sendJSON(req, res, { error: "Unauthorized" }, 401);
     const body = await parseBody(req);
@@ -682,6 +682,12 @@ const server = http.createServer(async (req, res) => {
     const results = [];
 
     const { chromium } = await import('playwright');
+    let browser = null;
+    try {
+      browser = await chromium.launch({ headless: true, channel: "chrome", args: ["--disable-blink-features=AutomationControlled", "--no-sandbox"] });
+    } catch (e) {
+      return sendJSON(req, res, { error: `Failed to launch browser: ${e.message}`, results: [], totalBalance: 0, totalGift: 0, okCount: 0, errCount: accounts.length, checked: 0 });
+    }
 
     for (const acct of accounts) {
       const { email, apiKey, cookies } = acct;
@@ -689,68 +695,75 @@ const server = http.createServer(async (req, res) => {
         results.push({ email, status: "Error", error: "Missing cookie fields (need passToken, cUserId, userId)", balance: null, gift: null, frozen: null, cash: null });
         continue;
       }
-      let browser = null;
+      let ctx = null;
       try {
-        browser = await chromium.launch({ headless: true, channel: "chrome", args: ["--disable-blink-features=AutomationControlled"] });
-        const ctx = await browser.newContext();
+        ctx = await browser.newContext();
         await ctx.addCookies([
           { name: "passToken", value: cookies.passToken, domain: ".xiaomimimo.com", path: "/" },
           { name: "cUserId", value: cookies.cUserId, domain: ".xiaomimimo.com", path: "/" },
           { name: "userId", value: cookies.userId, domain: ".xiaomimimo.com", path: "/" },
         ]);
         const page = await ctx.newPage();
-        await page.goto("https://platform.xiaomimimo.com/console/balance", { waitUntil: "domcontentloaded", timeout: 20000 });
-        await page.waitForTimeout(3000);
 
-        const balanceData = await page.evaluate(() => {
-          const text = document.body.innerText || "";
-          // Parse balance from page text
-          const lines = text.split(/\r?\n/);
-          let balance = null, gift = null, frozen = null, cash = null;
+        let navigated = false;
+        try {
+          await page.goto("https://platform.xiaomimimo.com/console/balance", { waitUntil: "domcontentloaded", timeout: 20000 });
+          navigated = true;
+        } catch (navErr) {
+          results.push({ email, status: "Error", error: `Navigation failed: ${navErr.message.split("\n")[0]}`, balance: null, gift: null, frozen: null, cash: null });
+          continue;
+        }
 
-          // Look for total balance
-          for (let i = 0; i < lines.length - 1; i++) {
-            const line = lines[i].trim();
-            if (/^balance$/i.test(line)) {
-              for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
-                const m = lines[j].match(/\$\s*([0-9]+\.[0-9]{2})/);
-                if (m) { balance = parseFloat(m[1]); break; }
+        if (navigated) {
+          // Check if redirected to login
+          const curUrl = page.url();
+          if (curUrl.includes("login") || curUrl.includes("sso")) {
+            results.push({ email, status: "Error", error: "Session expired (redirected to login)", balance: null, gift: null, frozen: null, cash: null });
+            continue;
+          }
+
+          await page.waitForTimeout(4000);
+
+          const balanceData = await page.evaluate(() => {
+            const text = document.body.innerText || "";
+            const lines = text.split(/\r?\n/);
+            let balance = null, gift = null, frozen = null, cash = null;
+
+            for (let i = 0; i < lines.length - 1; i++) {
+              const line = lines[i].trim();
+              if (/^balance$/i.test(line)) {
+                for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
+                  const m = lines[j].match(/\$\s*([0-9]+\.[0-9]{2})/);
+                  if (m) { balance = parseFloat(m[1]); break; }
+                }
               }
             }
-          }
 
-          // Cash and bonus/gift
-          const cashM = text.match(/cash\s+balance\s*[:\s]*\$\s*([0-9]+\.[0-9]{2})/i);
-          const bonusM = text.match(/bonus\s+balance\s*[:\s]*\$\s*([0-9]+\.[0-9]{2})/i);
-          if (cashM) cash = parseFloat(cashM[1]);
-          if (bonusM) gift = parseFloat(bonusM[1]);
-          if (balance === null && cash !== null && gift !== null) balance = cash + gift;
-          if (balance === null) {
-            // Fallback: smallest $X.XX < $50
-            const all = [...text.matchAll(/\$\s*([0-9]+\.[0-9]{2})/g)].map(m => parseFloat(m[1])).filter(n => n > 0 && n < 50);
-            if (all.length > 0) balance = Math.min(...all);
-          }
+            const cashM = text.match(/cash\s*balance\s*[:\s]*\$\s*([0-9]+\.[0-9]{2})/i);
+            const bonusM = text.match(/bonus\s*balance\s*[:\s]*\$\s*([0-9]+\.[0-9]{2})/i);
+            if (cashM) cash = parseFloat(cashM[1]);
+            if (bonusM) gift = parseFloat(bonusM[1]);
+            if (balance === null && cash !== null && gift !== null) balance = cash + gift;
+            if (balance === null) {
+              const all = [...text.matchAll(/\$\s*([0-9]+\.[0-9]{2})/g)].map(m => parseFloat(m[1])).filter(n => n > 0 && n < 50);
+              if (all.length > 0) balance = Math.min(...all);
+            }
+            return { balance, gift, frozen, cash };
+          }).catch(() => ({ balance: null, gift: null, frozen: null, cash: null }));
 
-          return { balance, gift, frozen, cash };
-        });
-
-        if (balanceData.balance !== null) {
-          results.push({ email, status: "OK", ...balanceData, apiKey: apiKey?.substring(0, 12) + "..." });
-        } else {
-          // Check if page is login/redirect
-          const url = page.url();
-          if (url.includes("login") || url.includes("sso")) {
-            results.push({ email, status: "Error", error: "Session expired (redirected to login)", balance: null, gift: null, frozen: null, cash: null });
+          if (balanceData.balance !== null) {
+            results.push({ email, status: "OK", ...balanceData, apiKey: apiKey?.substring(0, 12) + "..." });
           } else {
             results.push({ email, status: "Error", error: "Could not parse balance from page", balance: null, gift: null, frozen: null, cash: null });
           }
         }
       } catch (e) {
-        results.push({ email, status: "Error", error: e.message, balance: null, gift: null, frozen: null, cash: null });
+        results.push({ email, status: "Error", error: e.message.split("\n")[0], balance: null, gift: null, frozen: null, cash: null });
       } finally {
-        if (browser) await browser.close().catch(() => {});
+        if (ctx) await ctx.close().catch(() => {});
       }
     }
+    if (browser) await browser.close().catch(() => {});
     const totalBalance = results.filter(r => r.balance != null).reduce((s, r) => s + (parseFloat(r.balance) || 0), 0);
     const totalGift = results.filter(r => r.gift != null).reduce((s, r) => s + (parseFloat(r.gift) || 0), 0);
     const okCount = results.filter(r => r.status === "OK").length;
