@@ -419,22 +419,51 @@ export class QwenRegistration extends EventEmitter {
     // Select country
     if (!(await this._selectCountry(country))) return { status: 'error', reason: 'country-selection-failed' };
 
-    // Check agreement checkbox
+    // Check agreement checkbox — must be checked BEFORE Continue is clickable
     try {
-      await this.page.evaluate(() => {
-        const cb = document.querySelector('input[type="checkbox"]');
-        if (cb && !cb.checked) cb.click();
-      });
+      // Wait for checkbox to appear after country selection
+      const checkboxSel = '.maas-terms-text__checkbox, input[type="checkbox"]';
+      await this.page.waitForSelector(checkboxSel, { state: 'visible', timeout: 8000 });
       await sleep(500);
+
+      // Click the label/wrapper (more reliable than clicking input directly for React)
+      const checked = await this.page.evaluate(() => {
+        // Try the specific QwenCloud checkbox first
+        const cb = document.querySelector('.maas-terms-text__checkbox') || document.querySelector('input[type="checkbox"]');
+        if (!cb) return 'not-found';
+        if (cb.checked) return 'already-checked';
+        // Click the parent label (more reliable for React/Ant Design)
+        const label = cb.closest('label') || cb.parentElement;
+        if (label) { label.click(); } else { cb.click(); }
+        return 'clicked';
+      });
+      this.log(`agreement checkbox: ${checked}`);
+      await sleep(500);
+
+      // Verify checkbox is actually checked
+      const isChecked = await this.page.evaluate(() => {
+        const cb = document.querySelector('.maas-terms-text__checkbox') || document.querySelector('input[type="checkbox"]');
+        return cb ? cb.checked : false;
+      });
+      if (!isChecked) {
+        this.log('checkbox not checked after click, trying direct click...');
+        await this.page.locator('.maas-terms-text__checkbox, input[type="checkbox"]').first().click({ force: true });
+        await sleep(500);
+      }
     } catch (e) {
-      return { status: 'error', reason: `agreement-click-failed: ${e.message}` };
+      this.log(`agreement checkbox error: ${e.message}`);
+      // Don't return error here — try Continue anyway
     }
 
     // Click Continue
     try {
       const continueBtn = this.page.locator('button:has-text("Continue")');
+      await continueBtn.waitFor({ state: 'visible', timeout: 5000 });
       if (await continueBtn.count() > 0 && !(await continueBtn.isDisabled())) {
         await continueBtn.click();
+        this.log('Continue clicked');
+      } else {
+        this.log('Continue button disabled or not found');
       }
     } catch (e) {
       return { status: 'error', reason: `continue-click-failed: ${e.message}` };
@@ -546,15 +575,51 @@ export class QwenRegistration extends EventEmitter {
     this.log('navigating to API keys page');
     await this._dismissOverlays();
 
+    // Navigate to API keys page
     try { await this.page.goto('https://home.qwencloud.com/api-keys', { waitUntil: 'commit', timeout: 15000 }); } catch {}
 
+    // Handle redirect — if NOT on api-keys page, re-navigate
+    await sleep(3000);
+    let navUrl = this.page.url();
+    if (!navUrl.includes('api-keys')) {
+      this.log(`not on api-keys page (${navUrl.substring(0, 80)}), re-navigating...`);
+      // Go to home page first to establish session
+      try { await this.page.goto('https://home.qwencloud.com/', { waitUntil: 'domcontentloaded', timeout: 20000 }); } catch {}
+      await sleep(3000);
+      // Try API keys page again
+      try { await this.page.goto('https://home.qwencloud.com/api-keys', { waitUntil: 'domcontentloaded', timeout: 20000 }); } catch {}
+      await sleep(3000);
+      navUrl = this.page.url();
+      if (!navUrl.includes('api-keys')) {
+        this.log(`still not on api-keys (${navUrl.substring(0, 80)}), trying sidebar click...`);
+        try {
+          const sidebar = this.page.locator('a[href*="api-key"], a:has-text("API Key"), a:has-text("API key"), nav a:has-text("Key")').first();
+          if (await sidebar.count() > 0) { await sidebar.click(); await sleep(3000); }
+        } catch {}
+      }
+    }
+
+    // Log current URL for debugging
+    this.log(`API keys page URL: ${this.page.url().substring(0, 100)}`);
+
     if (!(await this._waitFor('button:has-text("Create API key")', 30000))) {
+      await this._dismissOverlays();
+      // Try sidebar link
       try {
-        await this._dismissOverlays();
-        await this.page.getByRole('link', { name: 'API Keys' }).first().click();
+        const apiKeysLink = this.page.locator('a:has-text("API Keys"), a:has-text("API keys"), [href*="api-key"]').first();
+        if (await apiKeysLink.count() > 0) {
+          await apiKeysLink.click();
+          await sleep(3000);
+        }
       } catch {}
       if (!(await this._waitFor('button:has-text("Create API key")', 15000))) {
         this.log('Create API key button not found');
+        // Save debug screenshot + HTML
+        try {
+          await this.page.screenshot({ path: `/tmp/qwen-apikey-fail-${Date.now()}.png`, fullPage: true });
+          const bodyText = await this.page.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
+          this.log(`page text: ${bodyText.substring(0, 300)}`);
+        } catch {}
         return null;
       }
     }
@@ -567,25 +632,77 @@ export class QwenRegistration extends EventEmitter {
 
     if (!(await this._waitForText('Create API Key', 15000))) { this.log('dialog not found'); return null; }
     await this._waitForPageLoad(5000);
+    await this._dismissOverlays();
 
+    // Debug: screenshot the dialog
+    try { await this.page.screenshot({ path: `/tmp/qwen-apikey-dialog-${Date.now()}.png` }); } catch {}
+
+    // Try multiple selectors for the description input
     try {
-      const desc = this.page.locator('input[placeholder*="Production API key"]');
-      await desc.waitFor({ state: 'visible', timeout: 10000 });
+      let desc = null;
+      const selectors = [
+        'input[placeholder*="Enter a description"]',
+        'input[placeholder*="description for your API Key"]',
+        'input[placeholder*="description"]',
+        'input[placeholder*="API Key"]',
+        'input[placeholder*="API key"]',
+        'input[placeholder*="Production API key"]',
+        'input[placeholder*="Enter a name"]',
+        '.ant-modal input[type="text"]',
+        '.ant-modal input:not([type="hidden"]):not([type="checkbox"])',
+        '[role="dialog"] input[type="text"]',
+        'dialog input[type="text"]',
+      ];
+      for (const sel of selectors) {
+        const el = this.page.locator(sel).first();
+        if (await el.count() > 0) {
+          desc = el;
+          this.log(`found desc input: ${sel}`);
+          break;
+        }
+      }
+      if (!desc) {
+        // Last resort: find any visible text input in the modal/dialog
+        desc = this.page.evaluate(() => {
+          const modals = document.querySelectorAll('.ant-modal, [role="dialog"], dialog');
+          for (const m of modals) {
+            const inp = m.querySelector('input[type="text"], input:not([type="hidden"]):not([type="checkbox"])');
+            if (inp) return true;
+          }
+          return false;
+        });
+        if (desc) {
+          desc = this.page.locator('.ant-modal input[type="text"], [role="dialog"] input[type="text"]').first();
+        }
+      }
+      if (!desc || await desc.count() === 0) {
+        this.log('desc input not found with any selector');
+        // Log all visible inputs for debugging
+        const inputs = await this.page.evaluate(() => {
+          return Array.from(document.querySelectorAll('input')).map(i => ({
+            type: i.type, placeholder: i.placeholder, visible: i.offsetWidth > 0
+          }));
+        });
+        this.log(`visible inputs: ${JSON.stringify(inputs)}`);
+        return null;
+      }
+      await desc.waitFor({ state: 'visible', timeout: 5000 });
       await desc.fill(description);
     } catch (e) { this.log(`desc fill failed: ${e.message}`); return null; }
 
-    const genDeadline = Date.now() + 10000;
-    while (Date.now() < genDeadline) {
-      try { if (!(await this.page.locator('button:has-text("Generate Key")').isDisabled())) break; }
-      catch { break; }
-      await sleep(500);
-    }
-
+    // Click the "Create API Key" submit button in the modal footer
     try {
-      const genBtn = this.page.locator('button:has-text("Generate Key")');
-      await genBtn.waitFor({ state: 'visible', timeout: 10000 });
-      await genBtn.click();
-    } catch (e) { this.log(`Generate Key failed: ${e.message}`); return null; }
+      await sleep(500);
+      const genBtn = this.page.locator('.ant-modal-footer button.ant-btn-primary, .ant-modal-footer button:has-text("Create")').first();
+      if (await genBtn.count() === 0) {
+        // Fallback: find any primary button in the modal
+        const fallback = this.page.locator('.ant-modal button.ant-btn-primary').first();
+        await fallback.click({ timeout: 5000 });
+      } else {
+        await genBtn.click({ timeout: 5000 });
+      }
+      this.log('Create API Key button clicked');
+    } catch (e) { this.log(`Create API Key button click failed: ${e.message}`); return null; }
 
     if (!(await this._waitForText('Copy your API Key', 20000))) { this.log('Copy dialog not found'); return null; }
 

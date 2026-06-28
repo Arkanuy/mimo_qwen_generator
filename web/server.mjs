@@ -51,12 +51,16 @@ function parseProxyLine(raw) {
   if (!raw) return null;
   const line = raw.trim();
   if (!line || line.startsWith("#")) return null;
+
+  // Validate: host must look like IP or hostname (no spaces, no special chars)
+  const isValidHost = (h) => /^\d{1,3}(\.\d{1,3}){3}$/.test(h) || /^[a-zA-Z0-9.-]+$/.test(h);
+
   // protocol://ip:port:user:pass
   const pm = line.match(/^(socks[45]|http):\/\//);
   if (pm) {
     const rest = line.slice(pm[0].length).split(":");
     const host = rest[0], port = parseInt(rest[1], 10);
-    if (!host || isNaN(port)) return null;
+    if (!host || isNaN(port) || !isValidHost(host)) return null;
     const r = { server: `${pm[1]}://${host}:${port}` };
     if (rest.length >= 4) { r.username = rest[2]; r.password = rest[3]; }
     return r;
@@ -65,7 +69,7 @@ function parseProxyLine(raw) {
   const p = line.split(":");
   if (p.length < 2) return null;
   const host = p[0], port = parseInt(p[1], 10);
-  if (!host || isNaN(port)) return null;
+  if (!host || isNaN(port) || !isValidHost(host)) return null;
   const proto = "socks5";
   const r = { server: `${proto}://${host}:${port}` };
   if (p.length >= 4) { r.username = p[2]; r.password = p[3]; }
@@ -95,18 +99,24 @@ async function testProxyHTTP(proxyObj, timeoutMs = 8000) {
   const { execFile } = await import('child_process');
   return new Promise((resolve) => {
     try {
-      const proto = proxyObj.server.startsWith('socks') ? '--socks5-hostname' : '--proxy';
-      const url = proxyObj.server.replace(/^(socks[45]|http):\/\//, '');
+      const isSocks = proxyObj.server.startsWith('socks');
+      const flag = isSocks ? '--socks5-hostname' : '--proxy';
+      // Build proxy URL with credentials: socks5://user:pass@host:port
+      const url = new URL(proxyObj.server);
+      if (proxyObj.username) url.username = proxyObj.username;
+      if (proxyObj.password) url.password = proxyObj.password;
+      const proxyArg = url.toString();
       const timer = setTimeout(() => resolve(false), timeoutMs);
       execFile('curl', [
         '-s', '-o', '/dev/null', '-w', '%{http_code}',
-        proto, url,
+        flag, proxyArg,
         '--connect-timeout', '5',
         '--max-time', '6',
-        'https://www.google.com/generate_204'
+        'http://connectivitycheck.gstatic.com/generate_204'
       ], { timeout: timeoutMs }, (err, stdout) => {
         clearTimeout(timer);
-        resolve(!err && (stdout.trim() === '204' || stdout.trim() === '200'));
+        const code = parseInt(stdout.trim(), 10);
+        resolve(!err && code >= 200 && code < 400);
       });
     } catch { resolve(false); }
   });
@@ -271,10 +281,10 @@ async function runMimoBatch(batchId, config) {
         }
 
         const reg = new MimoRegistration(iterConfig);
+        let tunnel = null;
         try {
           const chromeArgs = buildChromeArgs(fp, !!proxyObj);
           const launchOpts = { headless: config.headless, channel: "chrome", args: chromeArgs };
-          let tunnel = null;
           if (proxyObj) {
             if (proxyObj.username && proxyObj.password) {
               // SOCKS5 auth not supported by Chromium — create local tunnel
@@ -317,7 +327,7 @@ async function runMimoBatch(batchId, config) {
           addLog(batchId, `${tag} Creating API key...`);
           try { apiKey = await reg.createApiKey(); } catch (e) { addLog(batchId, `${tag} API key error: ${e.message}`); }
           addLog(batchId, `${tag} Filling Ultraspeed...`);
-          try { await reg.fillUltraspeedForm(email); } catch (e) { addLog(batchId, `${tag} Ultraspeed error: ${e.message}`); }
+          try { await reg.fillUltraspeedForm(email); } catch (e) { try { addLog(batchId, `${tag} Ultraspeed error: ${String(e?.message || e)}`); } catch {} }
 
           try {
             const cookies = await reg.page.context().cookies();
@@ -326,11 +336,13 @@ async function runMimoBatch(batchId, config) {
             userId = cookies.find(c => c.name === "userId")?.value || null;
           } catch {}
           connected = true;
+          try { addLog(batchId, `${tag} Loop done — connected=${connected}, apiKey=${apiKey ? "yes" : "null"}`); } catch {}
         } catch (err) {
           lastErr = err;
-          const isConnErr = /ERR_CONNECTION|ERR_CERT|ERR_PROXY|net::|ECONNRESET|ECONNREFUSED|tunnel|CERT_AUTHORITY/i.test(err.message);
+          try { addLog(batchId, `${tag} Error detail: ${String(err?.message || err).substring(0, 300)}`); } catch (logErr) { console.error("addLog failed:", logErr); }
+          const isConnErr = /ERR_CONNECTION|ERR_CERT|ERR_PROXY|net::|ECONNRESET|ECONNREFUSED|tunnel|CERT_AUTHORITY/i.test(err?.message || "");
           if (isConnErr && attempt < maxAttempts - 1) {
-            addLog(batchId, `${tag} ⚠ Connection error, trying next proxy...`);
+            try { addLog(batchId, `${tag} ⚠ Connection error, trying next proxy...`); } catch {}
           }
         } finally {
           if (reg.browser) await reg.browser.close().catch(() => {});
@@ -340,23 +352,26 @@ async function runMimoBatch(batchId, config) {
 
       if (!connected) throw lastErr || new Error("Failed to connect after all attempts");
 
+      try { addLog(batchId, `${tag} API key result: ${apiKey ? "obtained" : "null"}, connected: ${connected}`); } catch {}
       if (apiKey) {
-        addLog(batchId, `${tag} ✅ Account ${idx + 1} success — ${email}`);
+        try { addLog(batchId, `${tag} ✅ Account ${idx + 1} success — ${email}`); } catch {}
         batch.progress.success++;
-        saveBatchResult(batchId, { email, password: config.password, apiKey, passToken, cUserId, userId, ultraspeed: true });
+        try { saveBatchResult(batchId, { email, password: config.password, apiKey, passToken, cUserId, userId, ultraspeed: true }); } catch (saveErr) { console.error("saveBatchResult failed:", saveErr); }
         return { ok: true };
       } else {
-        addLog(batchId, `${tag} ❌ Account ${idx + 1} failed — no API key`);
+        try { addLog(batchId, `${tag} ❌ Account ${idx + 1} failed — no API key`); } catch {}
         batch.progress.failed++;
-        saveBatchResult(batchId, { email, password: config.password, ultraspeed: false, error: "No API key obtained" });
+        try { saveBatchResult(batchId, { email, password: config.password, ultraspeed: false, error: "No API key obtained" }); } catch {}
         return { ok: false };
       }
     } catch (err) {
-      const isRetryable = /captcha|CAPTCHA|unsolvable|timeout|ECONNREFUSED|ETIMEDOUT|tunnel|proxy|restrict/i.test(err.message);
-      if (isRetryable) { addLog(batchId, `${tag} ⚠ Account ${idx + 1} error, retrying...`); return { ok: false, retry: true }; }
-      addLog(batchId, `${tag} ❌ Account ${idx + 1} error: ${err.message}`);
+      const errMsg = String(err?.message || err || "unknown");
+      const isRetryable = /captcha|CAPTCHA|unsolvable|timeout|ECONNREFUSED|ETIMEDOUT|proxy|restrict/i.test(errMsg);
+      try { addLog(batchId, `${tag} OUTER CATCH: ${errMsg.substring(0, 200)} | retryable=${isRetryable}`); } catch {}
+      if (isRetryable) { try { addLog(batchId, `${tag} ⚠ Account ${idx + 1} error, retrying...`); } catch {} return { ok: false, retry: true }; }
+      try { addLog(batchId, `${tag} ❌ Account ${idx + 1} error: ${errMsg.substring(0, 200)}`); } catch {}
       batch.progress.failed++;
-      saveBatchResult(batchId, { email, password: config.password, ultraspeed: false, error: err.message });
+      try { saveBatchResult(batchId, { email, password: config.password, ultraspeed: false, error: errMsg }); } catch {}
       return { ok: false, retry: false };
     }
   }
@@ -369,15 +384,22 @@ async function runMimoBatch(batchId, config) {
         runAccount(idx, config.count, currentRef, threadId).then(result => {
           if (result.retry) {
             const retries = retryCount.get(idx) || 0;
-            if (retries < 3) { retryCount.set(idx, retries + 1); addLog(batchId, `[T${threadId}] ↻ Retry ${retries + 1}/3`); activeCount--; setTimeout(launchNext, 2000); return; }
-            else { addLog(batchId, `[T${threadId}] ❌ Max retries reached`); batch.progress.failed++; }
+            if (retries < 3) {
+              retryCount.set(idx, retries + 1);
+              addLog(batchId, `[T${threadId}] ↻ Retry ${retries + 1}/3`);
+              // Put this account back into the queue
+              nextIdx = idx;
+            } else {
+              addLog(batchId, `[T${threadId}] ❌ Max retries reached`);
+              batch.progress.failed++;
+            }
           }
         }).finally(() => {
           activeCount--;
           const b = db[batchId];
           if (!b || b.status === "stopped") stopped = true;
           if (nextIdx >= config.count && activeCount === 0) { if (b && b.status === "running") { setStatus(batchId, "completed"); addLog(batchId, `Done — ${b.progress.success} success, ${b.progress.failed} failed`); } resolve(); }
-          else if (!stopped) setTimeout(launchNext, 500);
+          else if (!stopped) setTimeout(launchNext, 100);
           else if (activeCount === 0) { if (b && b.status === "running") { setStatus(batchId, "stopped"); addLog(batchId, `Stopped — ${b.progress.success} success, ${b.progress.failed} failed`); } resolve(); }
         });
       }
@@ -595,10 +617,37 @@ const server = http.createServer(async (req, res) => {
     }
   }
 
+  // Save proxies to file
+  const PROXY_FILE = join(DB_DIR, "proxies.txt");
+  if (req.method === "POST" && url.pathname === "/api/proxies/save") {
+    if (!isAdmin(req)) return sendJSON(req, res, { error: "Unauthorized" }, 401);
+    const body = await parseBody(req);
+    const proxyText = body.proxies || "";
+    writeFileSync(PROXY_FILE, proxyText, "utf8");
+    const count = parseProxyList(proxyText).length;
+    return sendJSON(req, res, { ok: true, count });
+  }
+
+  // Load saved proxies
+  if (req.method === "GET" && url.pathname === "/api/proxies/saved") {
+    if (!isAdmin(req)) return sendJSON(req, res, { error: "Unauthorized" }, 401);
+    if (existsSync(PROXY_FILE)) {
+      const text = readFileSync(PROXY_FILE, "utf8");
+      const count = parseProxyList(text).length;
+      return sendJSON(req, res, { proxies: text, count });
+    }
+    return sendJSON(req, res, { proxies: "", count: 0 });
+  }
+
   // Admin-only
   if (req.method === "POST" && url.pathname === "/api/batch") {
     if (!isAdmin(req)) return sendJSON(req, res, { error: "Unauthorized" }, 401);
     const config = await parseBody(req);
+    // Auto-load saved proxies if none provided
+    if (!config.proxies && existsSync(PROXY_FILE)) {
+      const savedProxies = readFileSync(PROXY_FILE, "utf8").trim();
+      if (savedProxies) config.proxies = savedProxies;
+    }
     const batch = createBatch(config);
     setStatus(batch.id, "running");
     const proxyInfo = parseProxyList(config.proxies || "").length;

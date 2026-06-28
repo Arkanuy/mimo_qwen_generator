@@ -13,6 +13,7 @@ import { TempmailClient } from '../clients/tempmail.js';
 import { createCaptchaSolver } from '../clients/captcha.js';
 import { generateFingerprint, buildInitScript, buildExtraHeaders } from '../browser/fingerprint.js';
 import { humanFill, humanFillLocator, humanClick, humanType, humanDelay } from '../browser/human.js';
+import { writeFileSync, mkdirSync } from 'fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -731,6 +732,14 @@ class MimoRegistration {
           const buf = await response.body();
           base64Image = buf.toString('base64');
           console.log(`  ✓ Captcha image fetched via HTTP (${buf.length} bytes)`);
+          // Save captcha image for debugging
+          try {
+            const debugDir = join(__dirname, '..', '..', 'output', 'captcha-debug');
+            mkdirSync(debugDir, { recursive: true });
+            const imgPath = join(debugDir, `captcha-${Date.now()}-${8 - imageRetries}.png`);
+            writeFileSync(imgPath, buf);
+            console.log(`  💾 Saved captcha image: ${imgPath}`);
+          } catch (saveErr) { console.log(`  ! Failed to save captcha: ${saveErr.message}`); }
         } catch (fetchErr) {
           console.log(`  ! HTTP fetch failed (${fetchErr.message}), trying screenshot...`);
           const captchaImg = await this.page.$('img.mi-captcha-field__image, img[src*="getCode"]');
@@ -742,6 +751,14 @@ class MimoRegistration {
           await humanDelay(300, 600);
           const imgBuffer = await captchaImg.screenshot();
           base64Image = imgBuffer.toString('base64');
+          // Save captcha image for debugging
+          try {
+            const debugDir = join(__dirname, '..', '..', 'output', 'captcha-debug');
+            mkdirSync(debugDir, { recursive: true });
+            const imgPath = join(debugDir, `captcha-screenshot-${Date.now()}-${8 - imageRetries}.png`);
+            writeFileSync(imgPath, imgBuffer);
+            console.log(`  💾 Saved captcha screenshot: ${imgPath}`);
+          } catch (saveErr) { console.log(`  ! Failed to save captcha: ${saveErr.message}`); }
         }
 
         // 4. Solve using CapMonster

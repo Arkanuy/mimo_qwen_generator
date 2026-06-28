@@ -242,6 +242,25 @@ export function ConfigPanel({ onStart, isRunning }: ConfigPanelProps) {
                     className={`text-[10px] px-2 py-1 rounded-md border border-border/50 transition-colors flex items-center gap-1 ${fetchingProxies ? "bg-muted/50 text-muted-foreground cursor-wait" : "bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground"}`}>
                     {fetchingProxies ? <><Loader2 className="w-3 h-3 animate-spin" /> Testing...</> : "Auto Fetch"}
                   </button>
+                  <button type="button" onClick={async () => {
+                    if (!config.proxies.trim()) return;
+                    try {
+                      await fetch("/api/proxies/save", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ proxies: config.proxies }) });
+                    } catch {}
+                  }}
+                    className="text-[10px] px-2 py-1 rounded-md border border-border/50 bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground transition-colors">
+                    Save
+                  </button>
+                  <button type="button" onClick={async () => {
+                    try {
+                      const res = await fetch("/api/proxies/saved");
+                      const data = await res.json();
+                      if (data.proxies) update("proxies", data.proxies);
+                    } catch {}
+                  }}
+                    className="text-[10px] px-2 py-1 rounded-md border border-border/50 bg-muted hover:bg-muted/80 text-muted-foreground hover:text-foreground transition-colors">
+                    Load
+                  </button>
                 </div>
               </div>
               <textarea
