@@ -60,21 +60,6 @@ function CustomSelect({ value, onChange, options }: {
   );
 }
 
-/* ── Generator Toggle ──────────────────────────────── */
-        className={`flex items-center gap-1.5 px-3 h-10 text-xs font-medium transition-colors ${
-          value === "mimo" ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
-        }`}>
-        <Zap className="w-3.5 h-3.5" /> MiMo
-      </button>
-      <button type="button" onClick={() => onChange("qwencloud")}
-        className={`flex items-center gap-1.5 px-3 h-10 text-xs font-medium transition-colors ${
-          value === "qwencloud" ? "bg-foreground text-background" : "text-muted-foreground hover:text-foreground"
-        }`}>
-        <Cloud className="w-3.5 h-3.5" /> QwenCloud
-      </button>
-    </div>
-  );
-}
 
 export function ConfigPanel({ onStart, isRunning }: ConfigPanelProps) {
   const [config, setConfig] = useState<BatchConfig>({
