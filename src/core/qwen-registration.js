@@ -126,10 +126,9 @@ export class QwenRegistration extends EventEmitter {
       return tb.localeCompare(ta);
     });
     for (const msg of sorted) {
-      // Prefer plain text over HTML to avoid matching CSS/attribute numbers
-      const rawText = (msg.text || msg.body || '');
-      const htmlStripped = (msg.html || '').replace(/<[^>]*>/g, ' ').replace(/&[a-z]+;/gi, ' ');
-      const content = ((msg.subject || '') + ' ' + rawText + ' ' + htmlStripped).replace(/\s+/g, ' ');
+      // Strip HTML from ALL fields before matching
+      const stripHtml = (s) => (s || '').replace(/<[^>]*>/g, ' ').replace(/&[a-z]+;/gi, ' ');
+      const content = (stripHtml(msg.subject) + ' ' + stripHtml(msg.text || msg.body) + ' ' + stripHtml(msg.html)).replace(/\s+/g, ' ');
 
       const patterns = [
         // "verification code ... is: 231882" (handles "for Qwen Cloud is:" etc.)
@@ -153,6 +152,7 @@ export class QwenRegistration extends EventEmitter {
   // ── Main Run ─────────────────────────────────────────
   async run({ email: inputEmail, proxy, country, apiKeyDesc = "default" }) {
     const { chromium } = await import('playwright');
+    const { startTunnel } = await import(new URL('../../web/socks-tunnel.mjs', import.meta.url).pathname);
     const selectedCountry = country || randomCountry();
 
     // Create tempmail inbox
@@ -180,8 +180,20 @@ export class QwenRegistration extends EventEmitter {
         headless: this.config.browser?.headless ?? true,
         args: launchArgs,
       };
-      if (proxy) launchOpts.proxy = this._parseProxy(proxy);
+      let tunnel = null;
+      if (proxy) {
+        const parsed = this._parseProxy(proxy);
+        if (parsed && parsed.username && parsed.password) {
+          // SOCKS5 auth not supported by Chromium — create local tunnel
+          tunnel = await startTunnel(parsed);
+          this.log(`tunnel: 127.0.0.1:${tunnel.port} -> ${parsed.server.replace(/^(socks[45]|http):\/\//, "")}`);
+          launchOpts.proxy = { server: `socks5://127.0.0.1:${tunnel.port}` };
+        } else {
+          launchOpts.proxy = parsed;
+        }
+      }
 
+      this._tunnel = tunnel;
       this.browser = await chromium.launch(launchOpts);
       const ctx = await this.browser.newContext({
         viewport: { width: 1366, height: 768 },
@@ -241,6 +253,7 @@ export class QwenRegistration extends EventEmitter {
       return { status: 'error', email, reason: err.message };
     } finally {
       if (this.browser) await this.browser.close().catch(() => {});
+      if (this._tunnel) { try { this._tunnel.close(); } catch {} this._tunnel = null; }
     }
   }
 

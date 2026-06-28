@@ -6,6 +6,7 @@ import {
   Download, Square, Terminal, Eye, X, Copy, Check,
   Activity, HardDrive, Clock, Zap, AlertCircle, CheckCircle2
 } from "lucide-react";
+import { LogTerminal } from "@/components/dashboard/terminal";
 
 interface BatchResult {
   email: string; password: string; apiKey: string | null;
@@ -30,6 +31,8 @@ interface BatchTableProps {
   onSelect: (id: string | null) => void;
   onStop: (id: string) => void;
   onDelete: (id: string) => void;
+  logs?: string[];
+  onTerminalClose?: () => void;
 }
 
 const API = "";
@@ -208,7 +211,7 @@ function BatchDetailOverlay({ batch, onClose, onStop }: {
 }
 
 /* ── Main Batch Table ──────────────────────────────────────── */
-export function BatchTable({ batches, selectedBatch, onSelect, onStop, onDelete }: BatchTableProps) {
+export function BatchTable({ batches, selectedBatch, onSelect, onStop, onDelete, logs, onTerminalClose }: BatchTableProps) {
   const selected = batches.find(b => b.id === selectedBatch);
 
   if (batches.length === 0) {
@@ -341,6 +344,12 @@ export function BatchTable({ batches, selectedBatch, onSelect, onStop, onDelete 
                 </div>
               </div>
             </motion.div>
+            {/* Inline terminal below selected batch */}
+            {selectedBatch === batch.id && logs && onTerminalClose && (
+              <div className="mt-2">
+                <LogTerminal logs={logs} batchId={batch.id} onClose={onTerminalClose} />
+              </div>
+            )}
           </motion.div>
         ))}
       </AnimatePresence>

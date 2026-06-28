@@ -45,7 +45,7 @@ function setCors(req, res) { res.setHeader("Access-Control-Allow-Origin", req.he
 // ═══════════════════════════════════════════════════════════
 // ── Proxy helpers ─────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════
-const SOCKS_PORTS = new Set([1080, 1081, 4145, 4146, 10808, 10809, 9050, 9051, 9150]);
+// All proxies default to socks5 (user's proxy pool is all SOCKS5)
 
 function parseProxyLine(raw) {
   if (!raw) return null;
@@ -66,7 +66,7 @@ function parseProxyLine(raw) {
   if (p.length < 2) return null;
   const host = p[0], port = parseInt(p[1], 10);
   if (!host || isNaN(port)) return null;
-  const proto = SOCKS_PORTS.has(port) ? "socks5" : "http";
+  const proto = "socks5";
   const r = { server: `${proto}://${host}:${port}` };
   if (p.length >= 4) { r.username = p[2]; r.password = p[3]; }
   return r;

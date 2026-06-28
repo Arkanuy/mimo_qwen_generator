@@ -1,10 +1,8 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { AnimatePresence } from "framer-motion";
 import { useRouter } from "next/navigation";
 import { BatchTable } from "@/components/dashboard/batch-table";
-import { LogTerminal } from "@/components/dashboard/terminal";
 import { ConfigPanel } from "@/components/dashboard/config-panel";
 import { Activity, Layers, Cpu, LogOut, Users, Mail } from "lucide-react";
 import { getMe, logout } from "@/lib/auth";
@@ -206,15 +204,9 @@ export default function Dashboard() {
               </div>
             )}
           </div>
-          <BatchTable batches={batches} selectedBatch={selectedBatch} onSelect={setSelectedBatch} onStop={handleStop} onDelete={handleDelete} />
+          <BatchTable batches={batches} selectedBatch={selectedBatch} onSelect={setSelectedBatch} onStop={handleStop} onDelete={handleDelete} logs={liveLogs} onTerminalClose={() => setSelectedBatch(null)} />
 
 
-          {/* Terminal right below batch table */}
-          <AnimatePresence>
-            {selectedBatch && (
-              <LogTerminal logs={liveLogs} batchId={selectedBatch} onClose={() => setSelectedBatch(null)} />
-            )}
-          </AnimatePresence>
         </div>
       </div>
     </div>
