@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { BatchTable } from "@/components/dashboard/batch-table";
 import { ConfigPanel } from "@/components/dashboard/config-panel";
-import { Activity, Layers, Cpu, LogOut, Users, Mail } from "lucide-react";
+import { Activity, Layers, Cpu, LogOut, Users, Mail, Key, ShieldCheck } from "lucide-react";
 import { getMe, logout } from "@/lib/auth";
 
 const API = "";
@@ -169,6 +169,14 @@ export default function Dashboard() {
             <button onClick={() => router.push("/tempmail")}
               className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors bg-muted/50 border border-border/50 px-3 py-1.5 rounded-lg">
               <Mail className="w-3 h-3" /> Tempmail
+            </button>
+            <button onClick={() => router.push("/keys")}
+              className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors bg-muted/50 border border-border/50 px-3 py-1.5 rounded-lg">
+              <Key className="w-3 h-3" /> Keys
+            </button>
+            <button onClick={() => router.push("/checker")}
+              className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors bg-muted/50 border border-border/50 px-3 py-1.5 rounded-lg">
+              <ShieldCheck className="w-3 h-3" /> Checker
             </button>
             <button onClick={() => router.push("/status")}
               className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors bg-muted/50 border border-border/50 px-3 py-1.5 rounded-lg">

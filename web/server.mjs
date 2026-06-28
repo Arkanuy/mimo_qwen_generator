@@ -19,6 +19,7 @@ const __dirname = dirname(__filename);
 // ── Paths ────────────────────────────────────────────────
 const DB_DIR = join(__dirname, "..", "db");
 const DB_FILE = join(DB_DIR, "batches.json");
+const MASTER_KEYS_FILE = join(DB_DIR, "master-keys.json");
 const OUTPUT_DIR = join(__dirname, "..", "output");
 mkdirSync(DB_DIR, { recursive: true });
 mkdirSync(OUTPUT_DIR, { recursive: true });
@@ -197,6 +198,30 @@ function addLog(batchId, message) {
   if (listeners) listeners.forEach(fn => fn(line, batch));
 }
 
+// ── Master Keys Storage (persists across all batches) ──
+function loadMasterKeys() {
+  if (!existsSync(MASTER_KEYS_FILE)) return [];
+  try { return JSON.parse(readFileSync(MASTER_KEYS_FILE, "utf8")); } catch { return []; }
+}
+
+function appendMasterKey(entry) {
+  const keys = loadMasterKeys();
+  // Deduplicate by email
+  if (keys.some(k => k.email === entry.email)) return;
+  keys.push({
+    email: entry.email,
+    password: entry.password,
+    apiKey: entry.apiKey,
+    cookies: entry.cookies || {},
+    provider: entry.provider || "mimo",
+    created_at: entry.created_at || new Date().toISOString(),
+  });
+  writeFileSync(MASTER_KEYS_FILE, JSON.stringify(keys, null, 2), "utf8");
+  // Also append to master txt file
+  const masterTxt = join(DB_DIR, "master-keys.txt");
+  appendFileSync(masterTxt, entry.apiKey + "\n", "utf8");
+}
+
 function setStatus(batchId, status) {
   const batch = db[batchId]; if (!batch) return;
   batch.status = status;
@@ -357,6 +382,8 @@ async function runMimoBatch(batchId, config) {
         try { addLog(batchId, `${tag} ✅ Account ${idx + 1} success — ${email}`); } catch {}
         batch.progress.success++;
         try { saveBatchResult(batchId, { email, password: config.password, apiKey, passToken, cUserId, userId, ultraspeed: true }); } catch (saveErr) { console.error("saveBatchResult failed:", saveErr); }
+        // Also save to master keys
+        try { appendMasterKey({ email, password: config.password, apiKey, cookies: { passToken, cUserId, userId }, provider: "mimo" }); } catch {}
         return { ok: true };
       } else {
         try { addLog(batchId, `${tag} ❌ Account ${idx + 1} failed — no API key`); } catch {}
@@ -461,6 +488,7 @@ async function runQwenBatch(batchId, config) {
           batch.progress.success++;
           saveBatchResult(batchId, { email: rEmail, password: "", apiKey: result.apiKey, ultraspeed: false,
             extra: { baseUrlOpenai: result.baseUrlOpenai, baseUrlAnthropic: result.baseUrlAnthropic, country: result.country } });
+          try { appendMasterKey({ email: rEmail, password: "", apiKey: result.apiKey, provider: "qwencloud" }); } catch {}
           return { ok: true };
         } else if (result.status === "success-no-key") {
           addLog(batchId, `${tag} ⚠ Account ${idx+1} registered but no API key — ${rEmail}`);
@@ -637,6 +665,57 @@ const server = http.createServer(async (req, res) => {
       return sendJSON(req, res, { proxies: text, count });
     }
     return sendJSON(req, res, { proxies: "", count: 0 });
+  }
+
+  // Master keys API — all keys from all MiMo batches
+  if (req.method === "GET" && url.pathname === "/api/master-keys") {
+    const keys = loadMasterKeys();
+    const successKeys = keys.filter(k => k.apiKey);
+    return sendJSON(req, res, { keys: successKeys, total: successKeys.length });
+  }
+
+  // Checker API — validate API keys
+  if (req.method === "POST" && url.pathname === "/api/checker") {
+    if (!isAdmin(req)) return sendJSON(req, res, { error: "Unauthorized" }, 401);
+    const body = await parseBody(req);
+    const keysToCheck = body.keys || [];
+    const results = [];
+    // Check each key by hitting the MiMo API
+    for (const item of keysToCheck) {
+      const apiKey = typeof item === "string" ? item : item.apiKey;
+      if (!apiKey) { results.push({ apiKey, status: "invalid", error: "empty key" }); continue; }
+      try {
+        const resp = await fetch("https://api.xiaomimimo.com/v1/models", {
+          headers: { "Authorization": `Bearer ${apiKey}` },
+          signal: AbortSignal.timeout(10000),
+        });
+        if (resp.ok) {
+          results.push({ apiKey, status: "valid", code: resp.status });
+        } else if (resp.status === 401 || resp.status === 403) {
+          results.push({ apiKey, status: "invalid", code: resp.status });
+        } else {
+          results.push({ apiKey, status: "unknown", code: resp.status });
+        }
+      } catch (e) {
+        results.push({ apiKey, status: "error", error: e.message });
+      }
+    }
+    return sendJSON(req, res, { results, checked: results.length });
+  }
+
+  // Download master keys as txt or json
+  if (req.method === "GET" && url.pathname === "/api/master-keys/download") {
+    const format = url.searchParams.get("format") || "txt";
+    const keys = loadMasterKeys().filter(k => k.apiKey);
+    if (format === "json") {
+      setCors(req, res);
+      res.writeHead(200, { "Content-Type": "application/json", "Content-Disposition": 'attachment; filename="master-keys.json"' });
+      return res.end(JSON.stringify(keys, null, 2));
+    }
+    const txt = keys.map(k => k.apiKey).join("\n") + "\n";
+    setCors(req, res);
+    res.writeHead(200, { "Content-Type": "text/plain", "Content-Disposition": 'attachment; filename="master-keys.txt"' });
+    return res.end(txt);
   }
 
   // Admin-only
