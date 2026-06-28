@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { useRouter } from "next/navigation";
 import { getMe } from "@/lib/auth";
-import { ShieldCheck, ArrowLeft, Loader2, CheckCircle, XCircle, AlertCircle, DollarSign, Gift, RefreshCw } from "lucide-react";
+import { ShieldCheck, ArrowLeft, Loader2, CheckCircle, XCircle, DollarSign, Gift, RefreshCw, Upload } from "lucide-react";
 
 interface CheckResult {
   email: string;
@@ -13,7 +13,6 @@ interface CheckResult {
   frozen: number | null;
   cash: number | null;
   error?: string;
-  apiKey?: string;
 }
 
 interface MasterKey {
@@ -44,7 +43,7 @@ export default function CheckerPage() {
   const [progress, setProgress] = useState({ current: 0, total: 0 });
   const [summary, setSummary] = useState({ totalBalance: 0, totalGift: 0, okCount: 0, errCount: 0 });
   const [authChecked, setAuthChecked] = useState(false);
-  const [masterKeys, setMasterKeys] = useState<MasterKey[]>([]);
+  const [accounts, setAccounts] = useState<MasterKey[]>([]);
 
   useEffect(() => {
     getMe().then(r => {
@@ -58,52 +57,101 @@ export default function CheckerPage() {
     try {
       const res = await fetch("/api/master-keys");
       const data = await res.json();
-      setMasterKeys(data.keys || []);
+      setAccounts((data.keys || []).filter((k: MasterKey) => k.provider === "mimo"));
     } catch {}
   };
 
+  // Handle file upload (like AppVerse)
+  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = JSON.parse(ev.target?.result as string);
+        const arr = Array.isArray(data) ? data : [data];
+        setAccounts(arr.filter((k: any) => k.cookies?.passToken));
+      } catch { alert("Invalid JSON file"); }
+    };
+    reader.readAsText(file);
+  };
+
+  const checkAccount = async (acct: MasterKey): Promise<CheckResult> => {
+    const { email, cookies } = acct;
+    if (!cookies?.passToken || !cookies?.cUserId || !cookies?.userId) {
+      return { email, status: "Error", error: "Missing cookies", balance: null, gift: null, frozen: null, cash: null };
+    }
+    try {
+      // Set cookies in browser for xiaomimimo.com domain
+      document.cookie = `passToken=${cookies.passToken}; domain=.xiaomimimo.com; path=/; secure`;
+      document.cookie = `cUserId=${cookies.cUserId}; domain=.xiaomimimo.com; path=/; secure`;
+      document.cookie = `userId=${cookies.userId}; domain=.xiaomimimo.com; path=/; secure`;
+
+      // Make request from browser (client-side) — has active cookies
+      const resp = await fetch("https://platform.xiaomimimo.com/api/v1/user/balance", {
+        credentials: "include",
+        headers: { "Accept": "application/json" },
+      });
+
+      if (resp.status === 401) {
+        return { email, status: "Error", error: "Session expired (401)", balance: null, gift: null, frozen: null, cash: null };
+      }
+
+      const data = await resp.json();
+      const balance = data.balance ?? data.totalBalance ?? data.data?.balance ?? null;
+      const gift = data.gift ?? data.giftBalance ?? data.data?.gift ?? null;
+      const frozen = data.frozen ?? data.frozenBalance ?? data.data?.frozen ?? null;
+      const cash = data.cash ?? data.cashBalance ?? data.data?.cash ?? null;
+
+      if (balance !== null || gift !== null) {
+        return { email, status: "OK", balance: balance ?? 0, gift: gift ?? 0, frozen: frozen ?? 0, cash: cash ?? 0 };
+      }
+      return { email, status: "Error", error: "No balance in response", balance: null, gift: null, frozen: null, cash: null };
+    } catch (e: any) {
+      // CORS blocked or network error — try via server proxy
+      try {
+        const resp = await fetch("/api/checker", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ accounts: [acct] }),
+        });
+        const data = await resp.json();
+        return data.results?.[0] || { email, status: "Error", error: "No result from server", balance: null, gift: null, frozen: null, cash: null };
+      } catch (e2: any) {
+        return { email, status: "Error", error: e2.message, balance: null, gift: null, frozen: null, cash: null };
+      }
+    }
+  };
+
   const runChecker = useCallback(async () => {
-    if (masterKeys.length === 0) return;
+    if (accounts.length === 0) return;
     setChecking(true);
     setResults([]);
-    setProgress({ current: 0, total: masterKeys.length });
+    setProgress({ current: 0, total: accounts.length });
     setSummary({ totalBalance: 0, totalGift: 0, okCount: 0, errCount: 0 });
 
-    // Check in batches of 10 to avoid overwhelming
-    const batchSize = 10;
     const allResults: CheckResult[] = [];
     let totalBalance = 0, totalGift = 0, okCount = 0, errCount = 0;
 
-    for (let i = 0; i < masterKeys.length; i += batchSize) {
-      const batch = masterKeys.slice(i, i + batchSize);
-      try {
-        const res = await fetch("/api/checker", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ accounts: batch }),
-        });
-        const data = await res.json();
-        allResults.push(...(data.results || []));
-        totalBalance += data.totalBalance || 0;
-        totalGift += data.totalGift || 0;
-        okCount += data.okCount || 0;
-        errCount += data.errCount || 0;
-      } catch (e: any) {
-        for (const k of batch) {
-          allResults.push({ email: k.email, status: "Error", error: e.message, balance: null, gift: null, frozen: null, cash: null });
-          errCount++;
-        }
+    for (let i = 0; i < accounts.length; i++) {
+      const r = await checkAccount(accounts[i]);
+      allResults.push(r);
+      if (r.status === "OK") {
+        totalBalance += r.balance || 0;
+        totalGift += r.gift || 0;
+        okCount++;
+      } else {
+        errCount++;
       }
       setResults([...allResults]);
-      setProgress({ current: Math.min(i + batchSize, masterKeys.length), total: masterKeys.length });
+      setProgress({ current: i + 1, total: accounts.length });
       setSummary({ totalBalance, totalGift, okCount, errCount });
     }
 
     setChecking(false);
-  }, [masterKeys]);
+  }, [accounts]);
 
   const usdToIdr = (usd: number) => Math.round(usd * 17900);
-
   const estTokens = (balanceUsd: number, pricePer1M: number) => Math.floor((balanceUsd / pricePer1M) * 1_000_000);
 
   if (!authChecked) return null;
@@ -120,27 +168,22 @@ export default function CheckerPage() {
             <ShieldCheck className="w-6 h-6" />
             <h1 className="text-xl font-semibold">MiMo API Plan Checker</h1>
           </div>
-          <span className="text-sm text-muted-foreground">{masterKeys.length} accounts loaded</span>
+          <span className="text-sm text-muted-foreground">{accounts.length} accounts</span>
         </div>
 
-        {/* How it works */}
-        <div className="grid grid-cols-3 gap-4 text-center">
-          <div className="p-4 rounded-xl bg-muted/30 border border-border/30">
-            <div className="text-2xl font-bold mb-1">1</div>
-            <div className="text-xs text-muted-foreground">Auto-load from Master Keys</div>
-          </div>
-          <div className="p-4 rounded-xl bg-muted/30 border border-border/30">
-            <div className="text-2xl font-bold mb-1">2</div>
-            <div className="text-xs text-muted-foreground">Check each account with progress</div>
-          </div>
-          <div className="p-4 rounded-xl bg-muted/30 border border-border/30">
-            <div className="text-2xl font-bold mb-1">3</div>
-            <div className="text-xs text-muted-foreground">See balance, status, token estimates</div>
-          </div>
+        {/* Upload + Load */}
+        <div className="flex gap-3">
+          <label className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-muted hover:bg-muted/80 cursor-pointer text-sm transition-colors">
+            <Upload className="w-4 h-4" /> Upload JSON
+            <input type="file" accept=".json" onChange={handleFileUpload} className="hidden" />
+          </label>
+          <button onClick={loadMasterKeys} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-muted hover:bg-muted/80 text-sm transition-colors">
+            <RefreshCw className="w-4 h-4" /> Load Master Keys ({accounts.length})
+          </button>
         </div>
 
-        {/* Model Pricing */}
-        <div className="rounded-xl border border-border/50 p-5 space-y-4">
+        {/* Pricing */}
+        <div className="rounded-xl border border-border/50 p-5 space-y-3">
           <h2 className="text-sm font-semibold">Model Pricing Info</h2>
           <div className="grid grid-cols-2 gap-4">
             <div className="p-3 rounded-lg bg-muted/20">
@@ -160,19 +203,15 @@ export default function CheckerPage() {
               </div>
             </div>
           </div>
-          <p className="text-[10px] text-muted-foreground">* Harga per 1M token dari mimo.mi.com</p>
         </div>
 
-        {/* Run button + progress */}
+        {/* Run + Progress */}
         <div className="flex items-center gap-4">
-          <button
-            onClick={runChecker}
-            disabled={checking || masterKeys.length === 0}
-            className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-foreground text-background text-sm font-medium disabled:opacity-50 transition-colors hover:opacity-90"
-          >
+          <button onClick={runChecker} disabled={checking || accounts.length === 0}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-foreground text-background text-sm font-medium disabled:opacity-50 transition-colors hover:opacity-90">
             {checking ? <><Loader2 className="w-4 h-4 animate-spin" /> Checking {progress.current}/{progress.total}...</> :
              results.length > 0 ? <><RefreshCw className="w-4 h-4" /> Check Again</> :
-             <><ShieldCheck className="w-4 h-4" /> Start Check ({masterKeys.length})</>}
+             <><ShieldCheck className="w-4 h-4" /> Start Check ({accounts.length})</>}
           </button>
           {checking && (
             <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden">
@@ -181,7 +220,7 @@ export default function CheckerPage() {
           )}
         </div>
 
-        {/* Summary Cards */}
+        {/* Summary */}
         {results.length > 0 && (
           <>
             <div className="grid grid-cols-4 gap-4">
@@ -210,30 +249,20 @@ export default function CheckerPage() {
                 <h2 className="text-sm font-semibold">Estimasi Remaining Token</h2>
                 <p className="text-xs text-muted-foreground">Berdasarkan total balance ${summary.totalBalance.toFixed(2)} USD</p>
                 <div className="grid grid-cols-3 gap-4">
-                  <div className="p-3 rounded-lg bg-blue-500/5 border border-blue-500/10">
-                    <div className="text-xs font-semibold text-blue-400 mb-2">PRO</div>
-                    <div className="text-xs text-muted-foreground space-y-1">
-                      <div>Cache Hit: <span className="text-foreground font-mono">{fmtNum(estTokens(summary.totalBalance, PRICING.pro.cacheHit))}</span></div>
-                      <div>Cache Miss: <span className="text-foreground font-mono">{fmtNum(estTokens(summary.totalBalance, PRICING.pro.cacheMiss))}</span></div>
-                      <div>Output: <span className="text-foreground font-mono">{fmtNum(estTokens(summary.totalBalance, PRICING.pro.output))}</span></div>
+                  {[
+                    { label: "PRO", color: "blue", price: PRICING.pro },
+                    { label: "STD", color: "green", price: PRICING.std },
+                    { label: "MIX", color: "purple", price: { cacheHit: (PRICING.pro.cacheHit + PRICING.std.cacheHit) / 2, cacheMiss: (PRICING.pro.cacheMiss + PRICING.std.cacheMiss) / 2, output: (PRICING.pro.output + PRICING.std.output) / 2 } },
+                  ].map(m => (
+                    <div key={m.label} className={`p-3 rounded-lg bg-${m.color}-500/5 border border-${m.color}-500/10`}>
+                      <div className={`text-xs font-semibold text-${m.color}-400 mb-2`}>{m.label}</div>
+                      <div className="text-xs text-muted-foreground space-y-1">
+                        <div>Cache Hit: <span className="text-foreground font-mono">{fmtNum(estTokens(summary.totalBalance, m.price.cacheHit))}</span></div>
+                        <div>Cache Miss: <span className="text-foreground font-mono">{fmtNum(estTokens(summary.totalBalance, m.price.cacheMiss))}</span></div>
+                        <div>Output: <span className="text-foreground font-mono">{fmtNum(estTokens(summary.totalBalance, m.price.output))}</span></div>
+                      </div>
                     </div>
-                  </div>
-                  <div className="p-3 rounded-lg bg-green-500/5 border border-green-500/10">
-                    <div className="text-xs font-semibold text-green-400 mb-2">STD</div>
-                    <div className="text-xs text-muted-foreground space-y-1">
-                      <div>Cache Hit: <span className="text-foreground font-mono">{fmtNum(estTokens(summary.totalBalance, PRICING.std.cacheHit))}</span></div>
-                      <div>Cache Miss: <span className="text-foreground font-mono">{fmtNum(estTokens(summary.totalBalance, PRICING.std.cacheMiss))}</span></div>
-                      <div>Output: <span className="text-foreground font-mono">{fmtNum(estTokens(summary.totalBalance, PRICING.std.output))}</span></div>
-                    </div>
-                  </div>
-                  <div className="p-3 rounded-lg bg-purple-500/5 border border-purple-500/10">
-                    <div className="text-xs font-semibold text-purple-400 mb-2">MIX</div>
-                    <div className="text-xs text-muted-foreground space-y-1">
-                      <div>Cache Hit: <span className="text-foreground font-mono">{fmtNum(estTokens(summary.totalBalance, (PRICING.pro.cacheHit + PRICING.std.cacheHit) / 2))}</span></div>
-                      <div>Cache Miss: <span className="text-foreground font-mono">{fmtNum(estTokens(summary.totalBalance, (PRICING.pro.cacheMiss + PRICING.std.cacheMiss) / 2))}</span></div>
-                      <div>Output: <span className="text-foreground font-mono">{fmtNum(estTokens(summary.totalBalance, (PRICING.pro.output + PRICING.std.output) / 2))}</span></div>
-                    </div>
-                  </div>
+                  ))}
                 </div>
               </div>
             )}
@@ -275,7 +304,7 @@ export default function CheckerPage() {
               </table>
             </div>
 
-            {/* Error Details */}
+            {/* Errors */}
             {results.some(r => r.error) && (
               <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-4 space-y-2">
                 <h3 className="text-sm font-semibold text-red-400">Detail Error</h3>

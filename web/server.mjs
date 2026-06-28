@@ -674,68 +674,97 @@ const server = http.createServer(async (req, res) => {
     return sendJSON(req, res, { keys: successKeys, total: successKeys.length });
   }
 
-  // Checker API — check MiMo balance via /api/v1/user/balance with cookies
+  // Checker API — check MiMo balance via Playwright (API needs STS token, not just cookies)
   if (req.method === "POST" && url.pathname === "/api/checker") {
     if (!isAdmin(req)) return sendJSON(req, res, { error: "Unauthorized" }, 401);
     const body = await parseBody(req);
     const accounts = body.accounts || [];
     const results = [];
 
+    const { chromium } = await import('playwright');
+    let browser = null;
+    try {
+      browser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-gpu", "--single-process"] });
+    } catch (e) {
+      try {
+        browser = await chromium.launch({ headless: true, channel: "chrome", args: ["--no-sandbox", "--disable-gpu"] });
+      } catch (e2) {
+        return sendJSON(req, res, { error: `Browser launch failed: ${e2.message}`, results: [], totalBalance: 0, totalGift: 0, okCount: 0, errCount: accounts.length, checked: 0 });
+      }
+    }
+
     for (const acct of accounts) {
       const { email, apiKey, cookies } = acct;
       if (!cookies?.passToken || !cookies?.cUserId || !cookies?.userId) {
-        results.push({ email, status: "Error", error: "Missing cookie fields (need passToken, cUserId, userId)", balance: null, gift: null, frozen: null, cash: null });
+        results.push({ email, status: "Error", error: "Missing cookie fields", balance: null, gift: null, frozen: null, cash: null });
         continue;
       }
+      let ctx = null;
       try {
-        const cookieStr = `passToken=${cookies.passToken}; cUserId=${cookies.cUserId}; userId=${cookies.userId}`;
-        const resp = await fetch("https://platform.xiaomimimo.com/api/v1/user/balance", {
-          headers: {
-            "Cookie": cookieStr,
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
-            "Accept": "application/json",
-            "Referer": "https://platform.xiaomimimo.com/console/balance",
-          },
-          signal: AbortSignal.timeout(15000),
-        });
+        ctx = await browser.newContext();
+        await ctx.addCookies([
+          { name: "passToken", value: cookies.passToken, domain: ".xiaomimimo.com", path: "/" },
+          { name: "cUserId", value: cookies.cUserId, domain: ".xiaomimimo.com", path: "/" },
+          { name: "userId", value: cookies.userId, domain: ".xiaomimimo.com", path: "/" },
+        ]);
+        const page = await ctx.newPage();
 
-        if (resp.status === 401) {
-          results.push({ email, status: "Error", error: "Session expired (401) — cookies need refresh", balance: null, gift: null, frozen: null, cash: null });
-          continue;
-        }
-
-        if (!resp.ok) {
-          results.push({ email, status: "Error", error: `HTTP ${resp.status}`, balance: null, gift: null, frozen: null, cash: null });
-          continue;
-        }
-
-        const text = await resp.text();
-
-        // Check if response is JSON
-        let data;
         try {
-          data = JSON.parse(text);
-        } catch {
-          // Response is HTML (SPA fallback) — session valid but wrong endpoint
-          results.push({ email, status: "Error", error: "API returned HTML instead of JSON", balance: null, gift: null, frozen: null, cash: null });
+          await page.goto("https://platform.xiaomimimo.com/console/balance", { waitUntil: "domcontentloaded", timeout: 25000 });
+        } catch (navErr) {
+          results.push({ email, status: "Error", error: `Nav failed: ${navErr.message.split("\n")[0]}`, balance: null, gift: null, frozen: null, cash: null });
           continue;
         }
 
-        // Parse balance data from JSON response
-        const balance = data.balance ?? data.totalBalance ?? data.data?.balance ?? data.data?.totalBalance ?? null;
-        const gift = data.gift ?? data.giftBalance ?? data.data?.gift ?? data.data?.giftBalance ?? null;
-        const frozen = data.frozen ?? data.frozenBalance ?? data.data?.frozen ?? null;
-        const cash = data.cash ?? data.cashBalance ?? data.data?.cash ?? null;
+        // Check if redirected to login
+        const curUrl = page.url();
+        if (curUrl.includes("login") || curUrl.includes("sso")) {
+          results.push({ email, status: "Error", error: "Session expired (redirected to login)", balance: null, gift: null, frozen: null, cash: null });
+          continue;
+        }
 
-        if (balance !== null || gift !== null) {
-          results.push({ email, status: "OK", balance: balance ?? 0, gift: gift ?? 0, frozen: frozen ?? 0, cash: cash ?? 0, apiKey: apiKey?.substring(0, 12) + "..." });
+        // Wait for SPA to render
+        await page.waitForTimeout(5000);
+
+        const balanceData = await page.evaluate(() => {
+          const text = document.body.innerText || "";
+          const lines = text.split(/\r?\n/);
+          let balance = null, gift = null, frozen = null, cash = null;
+
+          for (let i = 0; i < lines.length - 1; i++) {
+            const line = lines[i].trim();
+            if (/^balance$/i.test(line)) {
+              for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
+                const m = lines[j].match(/\$\s*([0-9]+\.[0-9]{2})/);
+                if (m) { balance = parseFloat(m[1]); break; }
+              }
+            }
+          }
+
+          const cashM = text.match(/cash\s*balance\s*[:\s]*\$\s*([0-9]+\.[0-9]{2})/i);
+          const bonusM = text.match(/bonus\s*balance\s*[:\s]*\$\s*([0-9]+\.[0-9]{2})/i);
+          if (cashM) cash = parseFloat(cashM[1]);
+          if (bonusM) gift = parseFloat(bonusM[1]);
+          if (balance === null && cash !== null && gift !== null) balance = cash + gift;
+          if (balance === null) {
+            const all = [...text.matchAll(/\$\s*([0-9]+\.[0-9]{2})/g)].map(m => parseFloat(m[1])).filter(n => n > 0 && n < 50);
+            if (all.length > 0) balance = Math.min(...all);
+          }
+          return { balance, gift, frozen, cash };
+        }).catch(() => ({ balance: null, gift: null, frozen: null, cash: null }));
+
+        if (balanceData.balance !== null) {
+          results.push({ email, status: "OK", ...balanceData, apiKey: apiKey?.substring(0, 12) + "..." });
         } else {
-          results.push({ email, status: "Error", error: "Balance not found in response", balance: null, gift: null, frozen: null, cash: null, _raw: JSON.stringify(data).substring(0, 200) });
+          results.push({ email, status: "Error", error: "Could not parse balance", balance: null, gift: null, frozen: null, cash: null });
         }
       } catch (e) {
-        results.push({ email, status: "Error", error: e.message?.substring(0, 100), balance: null, gift: null, frozen: null, cash: null });
+        results.push({ email, status: "Error", error: e.message?.split("\n")[0]?.substring(0, 100), balance: null, gift: null, frozen: null, cash: null });
+      } finally {
+        if (ctx) await ctx.close().catch(() => {});
       }
     }
+    if (browser) await browser.close().catch(() => {});
     const totalBalance = results.filter(r => r.balance != null).reduce((s, r) => s + (parseFloat(r.balance) || 0), 0);
     const totalGift = results.filter(r => r.gift != null).reduce((s, r) => s + (parseFloat(r.gift) || 0), 0);
     const okCount = results.filter(r => r.status === "OK").length;
