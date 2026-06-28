@@ -9,13 +9,17 @@ import { EventEmitter } from 'events';
 const COUNTRIES = [
   "Indonesia", "Malaysia", "Singapore", "Thailand", "Philippines",
   "Vietnam", "United States", "United Kingdom", "Germany",
-  "Australia", "Canada", "Netherlands", "France", "India", "Brazil",
+  "Australia", "Canada", "Netherlands", "France", "Brazil",
   "Mexico", "Turkey", "Spain", "Italy", "Sweden",
   "Norway", "Denmark", "Finland", "Poland", "Portugal",
   "Ireland", "Belgium", "Austria", "Switzerland", "Czech Republic",
   "Romania", "Greece", "Croatia", "Argentina", "Chile", "Colombia",
   "Peru", "South Africa", "New Zealand", "United Arab Emirates",
   "Saudi Arabia", "Egypt", "Morocco", "Kenya", "Nigeria",
+  "Japan", "South Korea", "Taiwan", "Hong Kong", "Pakistan",
+  "Bangladesh", "Sri Lanka", "Nepal", "Myanmar", "Cambodia",
+  "Laos", "Philippines", "Ghana", "Tanzania", "Uganda",
+  "Ethiopia", "Algeria", "Tunisia", "Jordan", "Lebanon",
 ];
 
 const BASE_OPENAI = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
@@ -162,6 +166,15 @@ export class QwenRegistration extends EventEmitter {
         email = await this._createTempmailInbox();
         this.log(`Email created: ${email}`);
       }
+      // Capture baseline message count right after email creation
+      this._baselineCount = 0;
+      try {
+        const preRes = await fetch(`${this.tempmailUrl}/inboxes/${encodeURIComponent(email)}/messages`, {
+          headers: { 'Content-Type': 'application/json', ...(this.tempmailSession ? { 'x-session-id': this.tempmailSession } : {}) }
+        });
+        if (preRes.ok) { const preMsgs = await preRes.json(); this._baselineCount = preMsgs?.length || 0; }
+      } catch {}
+      this.log(`baseline messages: ${this._baselineCount}`);
     } catch (e) {
       return { status: 'error', email: inputEmail, reason: `Email creation failed: ${e.message}` };
     }
@@ -202,6 +215,7 @@ export class QwenRegistration extends EventEmitter {
       this.page = await ctx.newPage();
       this.page.setDefaultTimeout(30000);
 
+      this._email = email; // store for re-login in _createApiKey
       this.log(`QwenCloud | email=${email} | country=${selectedCountry}`);
 
       // 1. Go to QwenCloud
@@ -252,6 +266,10 @@ export class QwenRegistration extends EventEmitter {
       this.log(`[${email}] error: ${err.message}`);
       return { status: 'error', email, reason: err.message };
     } finally {
+      if (this._keepBrowserOpen && this.browser) {
+        this.log('⏸ Browser kept open for inspection (5 min timeout)...');
+        await sleep(300000);
+      }
       if (this.browser) await this.browser.close().catch(() => {});
       if (this._tunnel) { try { this._tunnel.close(); } catch {} this._tunnel = null; }
     }
@@ -295,9 +313,9 @@ export class QwenRegistration extends EventEmitter {
       return { status: 'error', reason: 'verification-code-page-not-found' };
     }
 
-    // Get verification code — only accept emails after requestTime
-    const code = await this._getVerificationCode(email, requestTime);
+    const code = await this._getVerificationCode(email, requestTime, this._baselineCount || 0);
     if (!code) return { status: 'error', reason: 'verification-code-not-found' };
+    this._lastSignupCode = code;
 
     // Type OTP into the individual boxes or single input
     try {
@@ -484,14 +502,15 @@ export class QwenRegistration extends EventEmitter {
   // ── Login Flow ───────────────────────────────────────
   async _doLogin(email) {
     this.log(`login for ${email}`);
-    const requestTime = Date.now();
 
+    // Fill email and trigger "Send Code"
     try {
       await this.page.getByRole('textbox', { name: 'Email' }).fill(email);
       await sleep(500);
       const sendBtn = this.page.getByRole('button', { name: 'Send Code' });
       if (await sendBtn.count() > 0) {
         await sendBtn.click();
+        this.log('Send Code clicked');
       } else {
         const nextBtn = this.page.locator('button:has-text("Next")');
         if (await nextBtn.count() > 0) {
@@ -499,15 +518,32 @@ export class QwenRegistration extends EventEmitter {
           await this._waitForPageLoad(10000);
           await sleep(500);
           const sendBtn2 = this.page.getByRole('button', { name: 'Send Code' });
-          if (await sendBtn2.count() > 0) await sendBtn2.click();
+          if (await sendBtn2.count() > 0) { await sendBtn2.click(); this.log('Send Code clicked (step 2)'); }
         }
       }
     } catch (e) {
       return { status: 'error', reason: `login-fill-failed: ${e.message}` };
     }
 
-    const code = await this._getVerificationCode(email, requestTime);
+    // Wait a moment for the email to be sent
+    await sleep(3000);
+
+    // Get baseline AFTER Send Code click — only want messages that arrive NOW
+    let loginBaseline = 0;
+    try {
+      const preRes = await fetch(`${this.tempmailUrl}/inboxes/${encodeURIComponent(email)}/messages`, {
+        headers: { 'Content-Type': 'application/json', ...(this.tempmailSession ? { 'x-session-id': this.tempmailSession } : {}) }
+      });
+      if (preRes.ok) { const preMsgs = await preRes.json(); loginBaseline = preMsgs?.length || 0; }
+    } catch {}
+    this.log(`login baseline (after Send Code): ${loginBaseline}`);
+
+    // Track the signup code so we don't reuse it
+    const signupCode = this._lastSignupCode || '';
+
+    const code = await this._getVerificationCode(email, Date.now(), loginBaseline, signupCode);
     if (!code) return { status: 'error', reason: 'login-verification-code-not-found' };
+    this._lastLoginCode = code;
 
     try {
       const vcInput = this.page.getByRole('textbox', { name: 'Verification Code' });
@@ -525,25 +561,37 @@ export class QwenRegistration extends EventEmitter {
     await this._waitForPageLoad(10000);
     await sleep(500);
 
+    // Wait for stable redirect to home page (not just a brief flash)
     const deadline = Date.now() + 30000;
+    let stableCount = 0;
     while (Date.now() < deadline) {
-      await sleep(500);
+      await sleep(1000);
       try {
-        if (this.page.url().includes('home.qwencloud.com')) {
-          await this.page.waitForLoadState('domcontentloaded', { timeout: 5000 });
-          return { status: 'login-ok' };
+        const curUrl = this.page.url();
+        if (curUrl.includes('home.qwencloud.com') && !curUrl.includes('sso/login')) {
+          stableCount++;
+          if (stableCount >= 2) {
+            // URL has been stable for 2+ seconds — session is valid
+            this.log(`login confirmed: ${curUrl.substring(0, 80)}`);
+            return { status: 'login-ok' };
+          }
+        } else {
+          stableCount = 0; // reset if redirected back to login
         }
       } catch { continue; }
     }
+    this.log(`login failed: still on ${this.page.url().substring(0, 80)}`);
     return { status: 'error', reason: 'login-dashboard-timeout' };
   }
 
   // ── Verification Code ────────────────────────────────
-  async _getVerificationCode(email, afterTime = 0) {
-    this.log(`polling tempmail for verification code...`);
+  async _getVerificationCode(email, afterTime = 0, baselineCount = 0, skipCode = '') {
+    this.log(`polling tempmail for verification code... (baselineCount=${baselineCount}${skipCode ? ', skipCode=' + skipCode : ''})`);
     const deadline = Date.now() + 300000;
     let attempt = 0;
-    let lastMsgCount = 0;
+    const seenCodes = new Set();
+    if (skipCode) seenCodes.add(skipCode); // don't return the signup code for login
+
     while (Date.now() < deadline) {
       attempt++;
       try {
@@ -552,13 +600,21 @@ export class QwenRegistration extends EventEmitter {
         });
         if (res.ok) {
           const messages = await res.json();
-          if (messages && messages.length > 0) {
-            if (messages.length !== lastMsgCount) {
-              lastMsgCount = messages.length;
-              this.log(`got ${messages.length} message(s), checking for code...`);
+          if (messages && messages.length > baselineCount) {
+            // Only look at messages beyond the baseline count (new ones)
+            const newMessages = messages.slice(baselineCount);
+            this.log(`got ${newMessages.length} new message(s) (total: ${messages.length}, baseline: ${baselineCount})`);
+
+            for (const msg of newMessages) {
+              const code = this._extractCode([msg]);
+              if (code && !seenCodes.has(code)) {
+                seenCodes.add(code);
+                this.log(`verification code: ${code}`);
+                return code;
+              }
             }
-            const code = this._extractCode(messages);
-            if (code) { this.log(`verification code: ${code}`); return code; }
+          } else {
+            if (attempt % 5 === 1) this.log(`waiting... (total: ${messages?.length || 0}, baseline: ${baselineCount})`);
           }
         }
       } catch (e) {
@@ -577,48 +633,83 @@ export class QwenRegistration extends EventEmitter {
 
     // Navigate to API keys page
     try { await this.page.goto('https://home.qwencloud.com/api-keys', { waitUntil: 'commit', timeout: 15000 }); } catch {}
-
-    // Handle redirect — if NOT on api-keys page, re-navigate
     await sleep(3000);
+
     let navUrl = this.page.url();
-    if (!navUrl.includes('api-keys')) {
-      this.log(`not on api-keys page (${navUrl.substring(0, 80)}), re-navigating...`);
-      // Go to home page first to establish session
-      try { await this.page.goto('https://home.qwencloud.com/', { waitUntil: 'domcontentloaded', timeout: 20000 }); } catch {}
-      await sleep(3000);
-      // Try API keys page again
-      try { await this.page.goto('https://home.qwencloud.com/api-keys', { waitUntil: 'domcontentloaded', timeout: 20000 }); } catch {}
-      await sleep(3000);
-      navUrl = this.page.url();
-      if (!navUrl.includes('api-keys')) {
-        this.log(`still not on api-keys (${navUrl.substring(0, 80)}), trying sidebar click...`);
-        try {
-          const sidebar = this.page.locator('a[href*="api-key"], a:has-text("API Key"), a:has-text("API key"), nav a:has-text("Key")').first();
-          if (await sidebar.count() > 0) { await sidebar.click(); await sleep(3000); }
-        } catch {}
+
+    // If redirected to SSO login, re-login with OTP
+    if (navUrl.includes('sso/login') || navUrl.includes('login.htm')) {
+      this.log('redirected to SSO login after signup, re-logging in...');
+      if (this._email) {
+        const loginResult = await this._doLogin(this._email);
+        this.log(`re-login result: ${loginResult.status}`);
+        if (loginResult.status === 'login-ok') {
+          // Navigate to HOME first to establish session cookies
+          await sleep(2000);
+          try { await this.page.goto('https://home.qwencloud.com/', { waitUntil: 'domcontentloaded', timeout: 20000 }); } catch {}
+          await sleep(3000);
+          this.log(`after re-login home: ${this.page.url().substring(0, 80)}`);
+          // Now try API keys via sidebar click (avoids new SSO redirect)
+          try {
+            const apiLink = this.page.locator('a[href*="api-key"], a:has-text("API Key"), a:has-text("API key"), nav a:has-text("Key")').first();
+            if (await apiLink.count() > 0) {
+              await apiLink.click();
+              await sleep(3000);
+            } else {
+              // Fallback: direct navigation
+              try { await this.page.goto('https://home.qwencloud.com/api-keys', { waitUntil: 'domcontentloaded', timeout: 20000 }); } catch {}
+              await sleep(3000);
+            }
+          } catch {}
+        }
       }
     }
 
-    // Log current URL for debugging
+    navUrl = this.page.url();
+
+    // If still not on api-keys page, try home page first
+    if (!navUrl.includes('api-keys')) {
+      this.log(`not on api-keys (${navUrl.substring(0, 80)}), trying via home...`);
+      try { await this.page.goto('https://home.qwencloud.com/', { waitUntil: 'domcontentloaded', timeout: 20000 }); } catch {}
+      await sleep(3000);
+      try { await this.page.goto('https://home.qwencloud.com/api-keys', { waitUntil: 'domcontentloaded', timeout: 20000 }); } catch {}
+      await sleep(3000);
+      navUrl = this.page.url();
+
+      // If still redirected to login, try login again
+      if (navUrl.includes('sso/login') || navUrl.includes('login.htm')) {
+        this.log('still on login page, re-logging in again...');
+        if (this._email) {
+          await this._doLogin(this._email);
+          await sleep(2000);
+          try { await this.page.goto('https://home.qwencloud.com/api-keys', { waitUntil: 'domcontentloaded', timeout: 20000 }); } catch {}
+          await sleep(3000);
+        }
+      }
+    }
+
     this.log(`API keys page URL: ${this.page.url().substring(0, 100)}`);
 
     if (!(await this._waitFor('button:has-text("Create API key")', 30000))) {
       await this._dismissOverlays();
       // Try sidebar link
       try {
-        const apiKeysLink = this.page.locator('a:has-text("API Keys"), a:has-text("API keys"), [href*="api-key"]').first();
-        if (await apiKeysLink.count() > 0) {
-          await apiKeysLink.click();
-          await sleep(3000);
-        }
+        const apiKeysLink = this.page.locator('a[href*="api-key"], a:has-text("API Key"), a:has-text("API key"), nav a:has-text("Key")').first();
+        if (await apiKeysLink.count() > 0) { await apiKeysLink.click(); await sleep(3000); }
       } catch {}
       if (!(await this._waitFor('button:has-text("Create API key")', 15000))) {
         this.log('Create API key button not found');
+        this._keepBrowserOpen = true;
         // Save debug screenshot + HTML
         try {
-          await this.page.screenshot({ path: `/tmp/qwen-apikey-fail-${Date.now()}.png`, fullPage: true });
+          const ts = Date.now();
+          await this.page.screenshot({ path: `/tmp/qwen-apikey-fail-${ts}.png`, fullPage: true });
+          const html = await this.page.content();
+          const fs = await import('fs');
+          fs.writeFileSync(`/tmp/qwen-apikey-fail-${ts}.html`, html.substring(0, 50000));
           const bodyText = await this.page.evaluate(() => document.body?.innerText?.substring(0, 500) || '');
           this.log(`page text: ${bodyText.substring(0, 300)}`);
+          this.log(`debug saved: /tmp/qwen-apikey-fail-${ts}.png + .html`);
         } catch {}
         return null;
       }
@@ -637,74 +728,75 @@ export class QwenRegistration extends EventEmitter {
     // Debug: screenshot the dialog
     try { await this.page.screenshot({ path: `/tmp/qwen-apikey-dialog-${Date.now()}.png` }); } catch {}
 
-    // Try multiple selectors for the description input
+    // Fill the description input in the dialog
+    // Placeholder: "e.g., Production API key for main application"
     try {
-      let desc = null;
-      const selectors = [
-        'input[placeholder*="Enter a description"]',
-        'input[placeholder*="description for your API Key"]',
-        'input[placeholder*="description"]',
-        'input[placeholder*="API Key"]',
-        'input[placeholder*="API key"]',
-        'input[placeholder*="Production API key"]',
-        'input[placeholder*="Enter a name"]',
-        '.ant-modal input[type="text"]',
-        '.ant-modal input:not([type="hidden"]):not([type="checkbox"])',
-        '[role="dialog"] input[type="text"]',
-        'dialog input[type="text"]',
-      ];
-      for (const sel of selectors) {
-        const el = this.page.locator(sel).first();
-        if (await el.count() > 0) {
-          desc = el;
-          this.log(`found desc input: ${sel}`);
-          break;
-        }
-      }
-      if (!desc) {
-        // Last resort: find any visible text input in the modal/dialog
-        desc = this.page.evaluate(() => {
-          const modals = document.querySelectorAll('.ant-modal, [role="dialog"], dialog');
-          for (const m of modals) {
-            const inp = m.querySelector('input[type="text"], input:not([type="hidden"]):not([type="checkbox"])');
-            if (inp) return true;
-          }
-          return false;
-        });
-        if (desc) {
-          desc = this.page.locator('.ant-modal input[type="text"], [role="dialog"] input[type="text"]').first();
-        }
-      }
-      if (!desc || await desc.count() === 0) {
-        this.log('desc input not found with any selector');
-        // Log all visible inputs for debugging
-        const inputs = await this.page.evaluate(() => {
-          return Array.from(document.querySelectorAll('input')).map(i => ({
-            type: i.type, placeholder: i.placeholder, visible: i.offsetWidth > 0
-          }));
-        });
-        this.log(`visible inputs: ${JSON.stringify(inputs)}`);
-        return null;
-      }
-      await desc.waitFor({ state: 'visible', timeout: 5000 });
-      await desc.fill(description);
+      // Wait for dialog input to appear
+      const desc = this.page.locator('[role="dialog"] input[type="text"], dialog input[type="text"]').first();
+      await desc.waitFor({ state: 'visible', timeout: 10000 });
+      await desc.click();
+      await sleep(200);
+      await desc.fill('');
+      await desc.pressSequentially(description, { delay: 30 });
+      await sleep(500);
+      const filledVal = await desc.evaluate(el => el.value).catch(() => '');
+      this.log(`desc filled: "${filledVal}"`);
     } catch (e) { this.log(`desc fill failed: ${e.message}`); return null; }
 
-    // Click the "Create API Key" submit button in the modal footer
+    // Wait for "Generate Key" button to become enabled (it's disabled until desc is filled)
     try {
-      await sleep(500);
-      const genBtn = this.page.locator('.ant-modal-footer button.ant-btn-primary, .ant-modal-footer button:has-text("Create")').first();
-      if (await genBtn.count() === 0) {
-        // Fallback: find any primary button in the modal
-        const fallback = this.page.locator('.ant-modal button.ant-btn-primary').first();
-        await fallback.click({ timeout: 5000 });
-      } else {
-        await genBtn.click({ timeout: 5000 });
-      }
-      this.log('Create API Key button clicked');
-    } catch (e) { this.log(`Create API Key button click failed: ${e.message}`); return null; }
+      await sleep(1000);
+      // Find the "Generate Key" button inside the dialog
+      const genBtn = this.page.locator('[role="dialog"] button:has-text("Generate Key")').first();
+      await genBtn.waitFor({ state: 'visible', timeout: 10000 });
 
-    if (!(await this._waitForText('Copy your API Key', 20000))) { this.log('Copy dialog not found'); return null; }
+      // Wait until button is not disabled
+      const deadline = Date.now() + 10000;
+      while (Date.now() < deadline) {
+        const disabled = await genBtn.evaluate(b => b.disabled).catch(() => true);
+        if (!disabled) break;
+        await sleep(500);
+      }
+
+      const disabled = await genBtn.evaluate(b => b.disabled).catch(() => true);
+      this.log(`Generate Key button: disabled=${disabled}`);
+      if (disabled) {
+        this.log('Generate Key button still disabled after filling desc');
+        return null;
+      }
+      await genBtn.click({ timeout: 5000 });
+      this.log('Generate Key clicked');
+    } catch (e) { this.log(`Generate Key click failed: ${e.message}`); return null; }
+
+    // Take screenshot after clicking to see what happened
+    await sleep(3000);
+    try {
+      const ts = Date.now();
+      await this.page.screenshot({ path: `/tmp/qwen-after-create-${ts}.png`, fullPage: true });
+      const bodyText = await this.page.evaluate(() => document.body?.innerText?.substring(0, 800) || '');
+      this.log(`after click text: ${bodyText.substring(0, 400)}`);
+      this.log(`screenshot: /tmp/qwen-after-create-${ts}.png`);
+    } catch {}
+
+    if (!(await this._waitForText('Copy your API Key', 20000))) {
+      // Maybe the key was created and shown differently — try to find sk- key directly
+      const directKey = await this.page.evaluate(() => {
+        const inputs = Array.from(document.querySelectorAll('input, code, pre, span, div'));
+        for (const el of inputs) {
+          const txt = el.value || el.textContent || '';
+          const m = txt.match(/sk-[a-zA-Z0-9_\-]{10,}/);
+          if (m) return m[0];
+        }
+        return null;
+      });
+      if (directKey) {
+        this.log(`API key found directly: ${directKey.substring(0, 20)}...`);
+        return directKey;
+      }
+      this.log('Copy dialog not found and no key visible');
+      this._keepBrowserOpen = true;
+      return null;
+    }
 
     const keyDeadline = Date.now() + 10000;
     while (Date.now() < keyDeadline) {

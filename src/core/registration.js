@@ -705,7 +705,7 @@ class MimoRegistration {
         return;
       }
 
-      let imageRetries = 7;
+      let imageRetries = 4;
       let solvedImage = false;
 
       while (imageRetries > 0 && !solvedImage) {
@@ -1047,7 +1047,7 @@ class MimoRegistration {
 
     // Wait for captcha modal to appear — this is the critical step
     console.log('  Waiting for captcha modal...');
-    await humanDelay(1000, 2000);
+    await humanDelay(500, 1000);
     // Give the page time to process the form submission
     try {
       await Promise.race([
@@ -1185,7 +1185,7 @@ class MimoRegistration {
       console.log('  ! No navigation detected after 10s, continuing...');
     }
     await this.page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
-    await humanDelay(1000, 2000);
+    await humanDelay(500, 1000);
   }
 
   async clickConsoleMenu() {
@@ -2059,10 +2059,10 @@ class MimoRegistration {
       waitUntil: 'networkidle',
       timeout: this.config.browser.timeout
     });
-    await this.page.waitForTimeout(4000);
+    await this.page.waitForTimeout(2000);
 
     await this.handleOAuthRedirect();
-    await this.page.waitForTimeout(2000);
+    await this.page.waitForTimeout(1000);
 
     // Terms modal mungkin muncul di sini kalau halaman ini yang pertama dibuka
     await this.handleTermsModal();
@@ -2141,7 +2141,7 @@ class MimoRegistration {
       });
     }
 
-    await this.page.waitForTimeout(4000);
+    await this.page.waitForTimeout(2000);
     await this.page.screenshot({ path: 'screenshot-apikey-created.png' });
     console.log('  ✓ Captured screenshot-apikey-created.png');
 
@@ -2175,7 +2175,7 @@ class MimoRegistration {
     const closeBtn = await this.page.$('.ant-modal-footer button, .ant-modal-wrap button:has-text("OK"), .ant-modal-wrap button:has-text("Close"), .ant-modal-wrap button:has-text("Confirm")');
     if (closeBtn) {
       await closeBtn.click().catch(() => {});
-      await this.page.waitForTimeout(2000);
+      await this.page.waitForTimeout(1000);
     } else {
       await this.page.keyboard.press('Escape').catch(() => {});
     }
@@ -2192,7 +2192,7 @@ class MimoRegistration {
       timeout: this.config.browser.timeout
     });
     console.log('✓ Form page loaded');
-    await this.page.waitForTimeout(5000);
+    await this.page.waitForTimeout(2000);
 
     // Debugging: take screenshot and print URL/Title
     console.log(`  Current page URL: ${this.page.url()}`);
@@ -2218,7 +2218,7 @@ class MimoRegistration {
     if (acceptCookiesBtn) {
       await acceptCookiesBtn.click({ force: true }).catch(() => {});
       console.log('  ✓ Accepted cookies');
-      await this.page.waitForTimeout(2000);
+      await this.page.waitForTimeout(1000);
     }
 
     // Handle Terms & Agreements modal if present
@@ -2366,8 +2366,8 @@ class MimoRegistration {
         await gotItBtn.click({ force: true });
         console.log('  ✓ Clicked "Got it" confirmation button');
         
-        // Wait a few seconds for actual form submission to process
-        await this.page.waitForTimeout(6000);
+        // Wait for actual form submission to process
+        await this.page.waitForTimeout(3000);
       } else {
         console.log('  ! "Got it" confirmation button not found (might have submitted directly or failed)');
       }
