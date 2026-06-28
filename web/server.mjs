@@ -418,7 +418,7 @@ async function runMimoBatch(batchId, config) {
               nextIdx = idx;
             } else {
               addLog(batchId, `[T${threadId}] ❌ Max retries reached`);
-              batch.progress.failed++;
+              if (db[batchId]) db[batchId].progress.failed++;
             }
           }
         }).finally(() => {
@@ -808,8 +808,9 @@ const server = http.createServer(async (req, res) => {
 });
 
 const PORT = 3001;
-server.listen(PORT, () => {
-  console.log(`\n  🔷 MiMo API Server running on http://localhost:${PORT}`);
+const HOST = process.env.HOST || "0.0.0.0";
+server.listen(PORT, HOST, () => {
+  console.log(`\n  🔷 MiMo API Server running on http://${HOST}:${PORT}`);
   console.log(`  Admin login: ${ADMIN_USER} / ${ADMIN_PASS}`);
   console.log(`  Database: ${DB_FILE}`);
   console.log(`  Loaded ${Object.keys(db).length} existing batch(es)\n`);
