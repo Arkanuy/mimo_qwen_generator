@@ -674,102 +674,96 @@ const server = http.createServer(async (req, res) => {
     return sendJSON(req, res, { keys: successKeys, total: successKeys.length });
   }
 
-  // Checker API — check MiMo balance via Playwright (API needs STS token, not just cookies)
+  // Checker API — check MiMo balance via external checker API
   if (req.method === "POST" && url.pathname === "/api/checker") {
     if (!isAdmin(req)) return sendJSON(req, res, { error: "Unauthorized" }, 401);
     const body = await parseBody(req);
     const accounts = body.accounts || [];
-    const results = [];
 
-    const { chromium } = await import('playwright');
-    let browser = null;
+    const CHECKER_API = "https://apikey.jimixz.tech/api/check";
+    const STATUS_API = "https://apikey.jimixz.tech/api/status";
+
     try {
-      browser = await chromium.launch({ headless: true, args: ["--no-sandbox", "--disable-gpu", "--single-process"] });
+      // Format accounts for the external checker API
+      const emails = accounts.map(a => a.email).filter(Boolean);
+      const cookiesJson = JSON.stringify(accounts.map(a => ({
+        email: a.email,
+        apiKey: a.apiKey || "",
+        cookies: {
+          passToken: a.cookies?.passToken || "",
+          cUserId: a.cookies?.cUserId || "",
+          userId: a.cookies?.userId || "",
+        },
+      })));
+
+      // Submit check request
+      const submitResp = await fetch(CHECKER_API, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cookies: cookiesJson, accounts: emails }),
+        signal: AbortSignal.timeout(30000),
+      });
+
+      if (!submitResp.ok) {
+        const errText = await submitResp.text();
+        return sendJSON(req, res, { error: `Checker API error: ${submitResp.status} ${errText.substring(0, 200)}`, results: [], totalBalance: 0, totalGift: 0, okCount: 0, errCount: accounts.length, checked: 0 });
+      }
+
+      const submitData = await submitResp.json();
+      const queueId = submitData.queue_id || submitData.id || submitData.queueId;
+
+      if (!queueId) {
+        // Maybe synchronous response with results
+        if (submitData.results || submitData.data) {
+          return sendJSON(req, res, submitData);
+        }
+        return sendJSON(req, res, { error: "No queue_id in response", raw: JSON.stringify(submitData).substring(0, 300), results: [], totalBalance: 0, totalGift: 0, okCount: 0, errCount: accounts.length, checked: 0 });
+      }
+
+      // Poll for results
+      let results = null;
+      for (let i = 0; i < 60; i++) {
+        await new Promise(r => setTimeout(r, 2000));
+        const statusResp = await fetch(`${STATUS_API}/${queueId}`, {
+          headers: { "Accept": "application/json" },
+          signal: AbortSignal.timeout(10000),
+        });
+        if (!statusResp.ok) continue;
+        const statusData = await statusResp.json();
+
+        if (statusData.status === "completed" || statusData.status === "done" || statusData.results) {
+          results = statusData.results || statusData.data || statusData;
+          break;
+        }
+        if (statusData.status === "failed" || statusData.status === "error") {
+          return sendJSON(req, res, { error: `Checker failed: ${statusData.error || statusData.message || "unknown"}`, results: [], totalBalance: 0, totalGift: 0, okCount: 0, errCount: accounts.length, checked: 0 });
+        }
+      }
+
+      if (!results) {
+        return sendJSON(req, res, { error: "Checker timeout (120s)", results: [], totalBalance: 0, totalGift: 0, okCount: 0, errCount: accounts.length, checked: 0 });
+      }
+
+      // Normalize results
+      const normalized = (Array.isArray(results) ? results : []).map(r => ({
+        email: r.email,
+        status: r.status || (r.balance != null ? "OK" : "Error"),
+        balance: r.balance ?? null,
+        gift: r.gift ?? null,
+        frozen: r.frozen ?? null,
+        cash: r.cash ?? null,
+        error: r.error || null,
+      }));
+
+      const totalBalance = normalized.filter(r => r.balance != null).reduce((s, r) => s + (parseFloat(r.balance) || 0), 0);
+      const totalGift = normalized.filter(r => r.gift != null).reduce((s, r) => s + (parseFloat(r.gift) || 0), 0);
+      const okCount = normalized.filter(r => r.status === "OK").length;
+      const errCount = normalized.filter(r => r.status === "Error").length;
+      return sendJSON(req, res, { results: normalized, totalBalance, totalGift, okCount, errCount, checked: normalized.length });
+
     } catch (e) {
-      try {
-        browser = await chromium.launch({ headless: true, channel: "chrome", args: ["--no-sandbox", "--disable-gpu"] });
-      } catch (e2) {
-        return sendJSON(req, res, { error: `Browser launch failed: ${e2.message}`, results: [], totalBalance: 0, totalGift: 0, okCount: 0, errCount: accounts.length, checked: 0 });
-      }
+      return sendJSON(req, res, { error: `Checker error: ${e.message}`, results: [], totalBalance: 0, totalGift: 0, okCount: 0, errCount: accounts.length, checked: 0 });
     }
-
-    for (const acct of accounts) {
-      const { email, apiKey, cookies } = acct;
-      if (!cookies?.passToken || !cookies?.cUserId || !cookies?.userId) {
-        results.push({ email, status: "Error", error: "Missing cookie fields", balance: null, gift: null, frozen: null, cash: null });
-        continue;
-      }
-      let ctx = null;
-      try {
-        ctx = await browser.newContext();
-        await ctx.addCookies([
-          { name: "passToken", value: cookies.passToken, domain: ".xiaomimimo.com", path: "/" },
-          { name: "cUserId", value: cookies.cUserId, domain: ".xiaomimimo.com", path: "/" },
-          { name: "userId", value: cookies.userId, domain: ".xiaomimimo.com", path: "/" },
-        ]);
-        const page = await ctx.newPage();
-
-        try {
-          await page.goto("https://platform.xiaomimimo.com/console/balance", { waitUntil: "domcontentloaded", timeout: 25000 });
-        } catch (navErr) {
-          results.push({ email, status: "Error", error: `Nav failed: ${navErr.message.split("\n")[0]}`, balance: null, gift: null, frozen: null, cash: null });
-          continue;
-        }
-
-        // Check if redirected to login
-        const curUrl = page.url();
-        if (curUrl.includes("login") || curUrl.includes("sso")) {
-          results.push({ email, status: "Error", error: "Session expired (redirected to login)", balance: null, gift: null, frozen: null, cash: null });
-          continue;
-        }
-
-        // Wait for SPA to render
-        await page.waitForTimeout(5000);
-
-        const balanceData = await page.evaluate(() => {
-          const text = document.body.innerText || "";
-          const lines = text.split(/\r?\n/);
-          let balance = null, gift = null, frozen = null, cash = null;
-
-          for (let i = 0; i < lines.length - 1; i++) {
-            const line = lines[i].trim();
-            if (/^balance$/i.test(line)) {
-              for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
-                const m = lines[j].match(/\$\s*([0-9]+\.[0-9]{2})/);
-                if (m) { balance = parseFloat(m[1]); break; }
-              }
-            }
-          }
-
-          const cashM = text.match(/cash\s*balance\s*[:\s]*\$\s*([0-9]+\.[0-9]{2})/i);
-          const bonusM = text.match(/bonus\s*balance\s*[:\s]*\$\s*([0-9]+\.[0-9]{2})/i);
-          if (cashM) cash = parseFloat(cashM[1]);
-          if (bonusM) gift = parseFloat(bonusM[1]);
-          if (balance === null && cash !== null && gift !== null) balance = cash + gift;
-          if (balance === null) {
-            const all = [...text.matchAll(/\$\s*([0-9]+\.[0-9]{2})/g)].map(m => parseFloat(m[1])).filter(n => n > 0 && n < 50);
-            if (all.length > 0) balance = Math.min(...all);
-          }
-          return { balance, gift, frozen, cash };
-        }).catch(() => ({ balance: null, gift: null, frozen: null, cash: null }));
-
-        if (balanceData.balance !== null) {
-          results.push({ email, status: "OK", ...balanceData, apiKey: apiKey?.substring(0, 12) + "..." });
-        } else {
-          results.push({ email, status: "Error", error: "Could not parse balance", balance: null, gift: null, frozen: null, cash: null });
-        }
-      } catch (e) {
-        results.push({ email, status: "Error", error: e.message?.split("\n")[0]?.substring(0, 100), balance: null, gift: null, frozen: null, cash: null });
-      } finally {
-        if (ctx) await ctx.close().catch(() => {});
-      }
-    }
-    if (browser) await browser.close().catch(() => {});
-    const totalBalance = results.filter(r => r.balance != null).reduce((s, r) => s + (parseFloat(r.balance) || 0), 0);
-    const totalGift = results.filter(r => r.gift != null).reduce((s, r) => s + (parseFloat(r.gift) || 0), 0);
-    const okCount = results.filter(r => r.status === "OK").length;
-    const errCount = results.filter(r => r.status === "Error").length;
-    return sendJSON(req, res, { results, totalBalance, totalGift, okCount, errCount, checked: results.length });
   }
 
 

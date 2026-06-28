@@ -40,7 +40,7 @@ export default function CheckerPage() {
   const router = useRouter();
   const [results, setResults] = useState<CheckResult[]>([]);
   const [checking, setChecking] = useState(false);
-  const [progress, setProgress] = useState({ current: 0, total: 0 });
+  const [statusText, setStatusText] = useState("");
   const [summary, setSummary] = useState({ totalBalance: 0, totalGift: 0, okCount: 0, errCount: 0 });
   const [authChecked, setAuthChecked] = useState(false);
   const [accounts, setAccounts] = useState<MasterKey[]>([]);
@@ -61,7 +61,6 @@ export default function CheckerPage() {
     } catch {}
   };
 
-  // Handle file upload (like AppVerse)
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -70,84 +69,46 @@ export default function CheckerPage() {
       try {
         const data = JSON.parse(ev.target?.result as string);
         const arr = Array.isArray(data) ? data : [data];
-        setAccounts(arr.filter((k: any) => k.cookies?.passToken));
+        setAccounts(arr.filter((k: any) => k.cookies?.passToken || k.apiKey));
       } catch { alert("Invalid JSON file"); }
     };
     reader.readAsText(file);
-  };
-
-  const checkAccount = async (acct: MasterKey): Promise<CheckResult> => {
-    const { email, cookies } = acct;
-    if (!cookies?.passToken || !cookies?.cUserId || !cookies?.userId) {
-      return { email, status: "Error", error: "Missing cookies", balance: null, gift: null, frozen: null, cash: null };
-    }
-    try {
-      // Set cookies in browser for xiaomimimo.com domain
-      document.cookie = `passToken=${cookies.passToken}; domain=.xiaomimimo.com; path=/; secure`;
-      document.cookie = `cUserId=${cookies.cUserId}; domain=.xiaomimimo.com; path=/; secure`;
-      document.cookie = `userId=${cookies.userId}; domain=.xiaomimimo.com; path=/; secure`;
-
-      // Make request from browser (client-side) — has active cookies
-      const resp = await fetch("https://platform.xiaomimimo.com/api/v1/user/balance", {
-        credentials: "include",
-        headers: { "Accept": "application/json" },
-      });
-
-      if (resp.status === 401) {
-        return { email, status: "Error", error: "Session expired (401)", balance: null, gift: null, frozen: null, cash: null };
-      }
-
-      const data = await resp.json();
-      const balance = data.balance ?? data.totalBalance ?? data.data?.balance ?? null;
-      const gift = data.gift ?? data.giftBalance ?? data.data?.gift ?? null;
-      const frozen = data.frozen ?? data.frozenBalance ?? data.data?.frozen ?? null;
-      const cash = data.cash ?? data.cashBalance ?? data.data?.cash ?? null;
-
-      if (balance !== null || gift !== null) {
-        return { email, status: "OK", balance: balance ?? 0, gift: gift ?? 0, frozen: frozen ?? 0, cash: cash ?? 0 };
-      }
-      return { email, status: "Error", error: "No balance in response", balance: null, gift: null, frozen: null, cash: null };
-    } catch (e: any) {
-      // CORS blocked or network error — try via server proxy
-      try {
-        const resp = await fetch("/api/checker", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ accounts: [acct] }),
-        });
-        const data = await resp.json();
-        return data.results?.[0] || { email, status: "Error", error: "No result from server", balance: null, gift: null, frozen: null, cash: null };
-      } catch (e2: any) {
-        return { email, status: "Error", error: e2.message, balance: null, gift: null, frozen: null, cash: null };
-      }
-    }
   };
 
   const runChecker = useCallback(async () => {
     if (accounts.length === 0) return;
     setChecking(true);
     setResults([]);
-    setProgress({ current: 0, total: accounts.length });
+    setStatusText("Submitting to checker...");
     setSummary({ totalBalance: 0, totalGift: 0, okCount: 0, errCount: 0 });
 
-    const allResults: CheckResult[] = [];
-    let totalBalance = 0, totalGift = 0, okCount = 0, errCount = 0;
+    try {
+      const resp = await fetch("/api/checker", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accounts }),
+      });
+      const data = await resp.json();
 
-    for (let i = 0; i < accounts.length; i++) {
-      const r = await checkAccount(accounts[i]);
-      allResults.push(r);
-      if (r.status === "OK") {
-        totalBalance += r.balance || 0;
-        totalGift += r.gift || 0;
-        okCount++;
-      } else {
-        errCount++;
+      if (data.error) {
+        setStatusText(`Error: ${data.error}`);
+        setChecking(false);
+        return;
       }
-      setResults([...allResults]);
-      setProgress({ current: i + 1, total: accounts.length });
-      setSummary({ totalBalance, totalGift, okCount, errCount });
-    }
 
+      if (data.results) {
+        setResults(data.results);
+        setSummary({
+          totalBalance: data.totalBalance || 0,
+          totalGift: data.totalGift || 0,
+          okCount: data.okCount || 0,
+          errCount: data.errCount || 0,
+        });
+        setStatusText(`Done — ${data.okCount || 0} OK, ${data.errCount || 0} failed`);
+      }
+    } catch (e: any) {
+      setStatusText(`Request failed: ${e.message}`);
+    }
     setChecking(false);
   }, [accounts]);
 
@@ -178,7 +139,7 @@ export default function CheckerPage() {
             <input type="file" accept=".json" onChange={handleFileUpload} className="hidden" />
           </label>
           <button onClick={loadMasterKeys} className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-muted hover:bg-muted/80 text-sm transition-colors">
-            <RefreshCw className="w-4 h-4" /> Load Master Keys ({accounts.length})
+            <RefreshCw className="w-4 h-4" /> Load Master Keys
           </button>
         </div>
 
@@ -209,15 +170,11 @@ export default function CheckerPage() {
         <div className="flex items-center gap-4">
           <button onClick={runChecker} disabled={checking || accounts.length === 0}
             className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-foreground text-background text-sm font-medium disabled:opacity-50 transition-colors hover:opacity-90">
-            {checking ? <><Loader2 className="w-4 h-4 animate-spin" /> Checking {progress.current}/{progress.total}...</> :
+            {checking ? <><Loader2 className="w-4 h-4 animate-spin" /> Checking...</> :
              results.length > 0 ? <><RefreshCw className="w-4 h-4" /> Check Again</> :
              <><ShieldCheck className="w-4 h-4" /> Start Check ({accounts.length})</>}
           </button>
-          {checking && (
-            <div className="flex-1 h-2 bg-muted rounded-full overflow-hidden">
-              <div className="h-full bg-foreground transition-all duration-300" style={{ width: `${(progress.current / progress.total) * 100}%` }} />
-            </div>
-          )}
+          {statusText && <span className="text-sm text-muted-foreground">{statusText}</span>}
         </div>
 
         {/* Summary */}
