@@ -674,46 +674,61 @@ const server = http.createServer(async (req, res) => {
     return sendJSON(req, res, { keys: successKeys, total: successKeys.length });
   }
 
-  // Checker API — check MiMo balance via external checker API
+  // Checker API — check MiMo balance via external checker API (apikey.jimixz.tech)
   if (req.method === "POST" && url.pathname === "/api/checker") {
     if (!isAdmin(req)) return sendJSON(req, res, { error: "Unauthorized" }, 401);
     const body = await parseBody(req);
-    const accounts = body.accounts || [];
+    let accounts = body.accounts || [];
+
+    // Auto-load from master keys if no accounts provided
+    if (accounts.length === 0) {
+      const masterKeys = loadMasterKeys().filter(k => k.provider === "mimo");
+      accounts = masterKeys;
+    }
+
+    if (accounts.length === 0) {
+      return sendJSON(req, res, { error: "No accounts found. Run a MiMo batch first.", results: [], totalBalance: 0, totalGift: 0, okCount: 0, errCount: 0, checked: 0 });
+    }
 
     const CHECKER_API = "https://apikey.jimixz.tech/api/check";
     const STATUS_API = "https://apikey.jimixz.tech/api/status";
 
     try {
-      // Format accounts for the external checker API
-      const emails = accounts.map(a => a.email).filter(Boolean);
-      const cookiesJson = JSON.stringify(accounts.map(a => ({
+      // Format: cookies = JSON-stringified array of full account objects
+      // accounts = array of email strings
+      const cookiesArray = accounts.map(a => ({
         email: a.email,
+        password: a.password || "",
         apiKey: a.apiKey || "",
         cookies: {
           passToken: a.cookies?.passToken || "",
           cUserId: a.cookies?.cUserId || "",
           userId: a.cookies?.userId || "",
         },
-      })));
+        provider: a.provider || "mimo",
+        created_at: a.created_at || new Date().toISOString(),
+      }));
+      const emails = accounts.map(a => a.email).filter(Boolean);
 
-      // Submit check request
       const submitResp = await fetch(CHECKER_API, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cookies: cookiesJson, accounts: emails }),
+        body: JSON.stringify({
+          cookies: JSON.stringify(cookiesArray),
+          accounts: emails,
+        }),
         signal: AbortSignal.timeout(30000),
       });
 
       if (!submitResp.ok) {
         const errText = await submitResp.text();
-        return sendJSON(req, res, { error: `Checker API error: ${submitResp.status} ${errText.substring(0, 200)}`, results: [], totalBalance: 0, totalGift: 0, okCount: 0, errCount: accounts.length, checked: 0 });
+        return sendJSON(req, res, { error: `Checker API: ${submitResp.status} ${errText.substring(0, 300)}`, results: [], totalBalance: 0, totalGift: 0, okCount: 0, errCount: accounts.length, checked: 0 });
       }
 
       const submitData = await submitResp.json();
       const queueId = submitData.queue_id || submitData.id || submitData.queueId;
 
       if (!queueId) {
-        // Maybe synchronous response with results
         if (submitData.results || submitData.data) {
           return sendJSON(req, res, submitData);
         }
@@ -744,7 +759,6 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(req, res, { error: "Checker timeout (120s)", results: [], totalBalance: 0, totalGift: 0, okCount: 0, errCount: accounts.length, checked: 0 });
       }
 
-      // Normalize results
       const normalized = (Array.isArray(results) ? results : []).map(r => ({
         email: r.email,
         status: r.status || (r.balance != null ? "OK" : "Error"),
