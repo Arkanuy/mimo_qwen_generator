@@ -31,7 +31,6 @@ export default function StatusPage() {
   const [connected, setConnected] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
 
-  // Check if user is admin (for showing admin link)
   useEffect(() => {
     getMe().then(r => {
       if (r.ok && r.role === "admin") setIsAdmin(true);
@@ -40,9 +39,9 @@ export default function StatusPage() {
 
   const fetchBatches = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/api/batch`);
+      const res = await fetch(`${API}/api/batches`);
       const data = await res.json();
-      setBatches(data);
+      setBatches(Array.isArray(data) ? data : []);
       setConnected(true);
     } catch {
       setConnected(false);
@@ -50,9 +49,9 @@ export default function StatusPage() {
   }, []);
 
   useEffect(() => {
-    fetchBatches();
+    const t = setTimeout(fetchBatches, 0);
     const interval = setInterval(fetchBatches, 2000);
-    return () => clearInterval(interval);
+    return () => { clearTimeout(t); clearInterval(interval); };
   }, [fetchBatches]);
 
   useEffect(() => {
@@ -68,9 +67,9 @@ export default function StatusPage() {
     return () => es.close();
   }, [selectedBatch]);
 
-  const totalSuccess = batches.reduce((s, b) => s + b.progress.success, 0);
-  const totalFailed = batches.reduce((s, b) => s + b.progress.failed, 0);
-  const runningCount = batches.filter(b => b.status === "running").length;
+  const totalSuccess = Array.isArray(batches) ? batches.reduce((s, b) => s + (b.progress?.success || 0), 0) : 0;
+  const totalFailed = Array.isArray(batches) ? batches.reduce((s, b) => s + (b.progress?.failed || 0), 0) : 0;
+  const runningCount = Array.isArray(batches) ? batches.filter(b => b.status === "running").length : 0;
   const selectedBatchData = batches.find(b => b.id === selectedBatch);
 
   const StatusBadge = ({ status }: { status: Batch["status"] }) => {
@@ -108,19 +107,19 @@ export default function StatusPage() {
             {isAdmin && (
               <button onClick={() => router.push("/")}
                 className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors bg-muted/50 border border-border/50 px-3 py-1.5 rounded-lg">
-                <Shield className="w-3 h-3" /> Admin Panel
+                <Shield className="w-3 h-3" /> Admin
               </button>
             )}
           </div>
         </div>
 
-        {/* Stats Grid */}
+        {/* Stats */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
           {[
-            { icon: <Layers className="w-4 h-4 text-muted-foreground" />, label: "Total Batches", value: batches.length, cls: "text-foreground" },
+            { icon: <Layers className="w-4 h-4 text-muted-foreground" />, label: "Workers", value: batches.length, cls: "" },
             { icon: <Activity className="w-4 h-4 text-green-400" />, label: "Running", value: runningCount, cls: "text-green-400" },
-            { icon: <Cpu className="w-4 h-4 text-green-400" />, label: "Total Success", value: totalSuccess, cls: "text-green-400" },
-            { icon: <Cpu className="w-4 h-4 text-red-400" />, label: "Total Failed", value: totalFailed, cls: "text-red-400" },
+            { icon: <Cpu className="w-4 h-4 text-emerald-400" />, label: "Success", value: totalSuccess, cls: "text-emerald-400" },
+            { icon: <Activity className="w-4 h-4 text-red-400" />, label: "Failed", value: totalFailed, cls: "text-red-400" },
           ].map((s, i) => (
             <div key={i} className="bg-card border border-border/30 rounded-xl p-4">
               <div className="flex items-center gap-2 mb-2">{s.icon}<span className="text-[10px] text-muted-foreground uppercase tracking-wider">{s.label}</span></div>
@@ -146,11 +145,12 @@ export default function StatusPage() {
             </div>
           ) : (
             <div className="space-y-2">
-              <AnimatePresence mode="popLayout">
+              <AnimatePresence mode="sync">
                 {batches.map((batch, idx) => (
-                  <motion.div key={batch.id} layout
-                    initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0, transition: { delay: idx * 0.04 } }}
-                    exit={{ opacity: 0, scale: 0.97 }}>
+                  <motion.div key={batch.id}
+                    initial={{ opacity: 0, y: 6 }}
+                    animate={{ opacity: 1, y: 0, transition: { delay: idx * 0.03, duration: 0.25, ease: "easeOut" } }}
+                    exit={{ opacity: 0, y: -4, transition: { duration: 0.15, ease: "easeIn" } }}>
                     <div onClick={() => setSelectedBatch(selectedBatch === batch.id ? null : batch.id)}
                       className={`relative bg-muted/40 border rounded-xl p-4 cursor-pointer transition-colors overflow-hidden ${
                         selectedBatch === batch.id ? "border-foreground/30 bg-muted/60" : "border-border/40 hover:border-border/70"
@@ -169,14 +169,14 @@ export default function StatusPage() {
                           <div className="flex items-center gap-3">
                             <div className="flex-1 h-2 bg-muted/50 rounded-full overflow-hidden border border-border/30">
                               <motion.div className={`h-full rounded-full ${batch.status === "running" ? "bg-green-500/70" : "bg-foreground/60"}`}
-                                initial={{ width: 0 }} animate={{ width: `${batch.progress.total > 0 ? (batch.progress.current / batch.progress.total) * 100 : 0}%` }} />
+                                initial={{ width: 0 }} animate={{ width: `${batch.progress?.total > 0 ? (batch.progress.current / batch.progress.total) * 100 : 0}%` }} />
                             </div>
-                            <span className="text-xs font-mono text-muted-foreground whitespace-nowrap">{batch.progress.current}/{batch.progress.total}</span>
+                            <span className="text-xs font-mono text-muted-foreground whitespace-nowrap">{batch.progress?.current || 0}/{batch.progress?.total || 0}</span>
                           </div>
                         </div>
                         <div className="flex items-center gap-4 text-xs text-muted-foreground">
-                          <span className="text-green-400 font-mono">✓ {batch.progress.success}</span>
-                          <span className="text-red-400 font-mono">✗ {batch.progress.failed}</span>
+                          <span className="text-green-400 font-mono">✓ {batch.progress?.success || 0}</span>
+                          <span className="text-red-400 font-mono">✗ {batch.progress?.failed || 0}</span>
                           <span className="font-mono">{batch.startedAt ? new Date(batch.startedAt).toLocaleTimeString("en-US", { hour12: false }) : "—"}</span>
                           <Eye className="w-3 h-3 opacity-50" />
                         </div>
@@ -190,9 +190,9 @@ export default function StatusPage() {
         </div>
 
         {/* Terminal */}
-        <AnimatePresence>
+        <AnimatePresence mode="sync">
           {selectedBatchData && (
-            <PublicTerminal logs={selectedBatchData.logs} batchId={selectedBatchData.id} onClose={() => setSelectedBatch(null)} />
+            <PublicTerminal logs={selectedBatchData.logs || []} batchId={selectedBatchData.id} onClose={() => setSelectedBatch(null)} />
           )}
         </AnimatePresence>
       </div>

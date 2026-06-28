@@ -62,9 +62,9 @@ export default function Dashboard() {
 
   useEffect(() => {
     if (!authChecked) return;
-    fetchBatches();
+    const t = setTimeout(fetchBatches, 0);
     const interval = setInterval(fetchBatches, 2000);
-    return () => clearInterval(interval);
+    return () => { clearTimeout(t); clearInterval(interval); };
   }, [fetchBatches, authChecked]);
 
   useEffect(() => {
@@ -81,7 +81,7 @@ export default function Dashboard() {
   }, [selectedBatch]);
 
   const handleStart = async (config: {
-    count: number; headless: boolean; threads: number; seedCode: string;
+    count: number; headless: boolean; threads: number; seedCode: string; mode?: "api" | "browser";
     password: string; captchaProvider: string; captchaApiKey: string; tempmailUrl: string;
   }) => {
     try {

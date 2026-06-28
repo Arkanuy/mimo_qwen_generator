@@ -35,6 +35,8 @@ class CaptchaSolver {
     params.append('method', 'base64');
     params.append('body', base64Image);
     params.append('json', '1');
+    params.append('case', '0');
+    params.append('numeric', '0');
 
     const response = await fetch(url, {
       method: 'POST',

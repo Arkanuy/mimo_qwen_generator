@@ -75,9 +75,9 @@ class CapMonsterSolver {
         task: {
           type: 'ImageToTextTask',
           body: body,
-          CapMonsterCaseSensitive: true,
+          CapMonsterCaseSensitive: false,
           CapMonsterNumeric: 0,
-          recognizingThreshold: 80,
+          recognizingThreshold: 60,
         },
       }),
     });

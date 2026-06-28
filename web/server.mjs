@@ -13,8 +13,14 @@ import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
 
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+
+// ── Load project config ───────────────────────────────────────────────
+const PROJECT_ROOT = join(__dirname, "..");
+let PROJECT_CONFIG = {};
+try { PROJECT_CONFIG = JSON.parse(readFileSync(join(PROJECT_ROOT, "config", "default.json"), "utf8")); } catch {}
 
 // ── Paths ────────────────────────────────────────────────
 const DB_DIR = join(__dirname, "..", "db");
@@ -252,18 +258,15 @@ async function runBatch(batchId, config) {
   return runMimoBatch(batchId, config);
 }
 
-// ── MiMo (PARALLEL) ──────────────────────────────────────
+// ── MiMo (PARALLEL — API-first, browser fallback) ────────
 async function runMimoBatch(batchId, config) {
-  const { MimoRegistration } = await import("../src/core/registration.js");
-  const { generateFingerprint, buildInitScript, buildExtraHeaders } = await import("../src/browser/fingerprint.js");
-  const { chromium } = await import("playwright");
-
+  const useApiMode = config.mode !== "browser"; // default: api mode
   const threadCount = Math.min(config.threads || 1, config.count);
   let currentRef = config.seedCode;
   let nextIdx = 0, activeCount = 0, stopped = false;
   const useProxy = parseProxyList(config.proxies || "").length > 0;
 
-  addLog(batchId, `🚀 Launching ${threadCount} parallel thread(s) for ${config.count} accounts...`);
+  addLog(batchId, `🚀 Launching ${threadCount} thread(s) for ${config.count} accounts (${useApiMode ? "API" : "Browser"} mode)...`);
   if (useProxy) addLog(batchId, `🌐 ${parseProxyList(config.proxies).length} proxy loaded`);
 
   async function runAccount(idx, total, ref, threadId) {
@@ -274,8 +277,9 @@ async function runMimoBatch(batchId, config) {
     batch.progress.current = Math.max(batch.progress.current, idx + 1);
 
     const iterConfig = {
-      tempmail: { apiUrl: config.tempmailUrl },
+      tempmail: { apiUrl: config.tempmailUrl || PROJECT_CONFIG.tempmail?.apiUrl || "https://tempik.sutros.my.id/api" },
       captcha: { provider: config.captchaProvider, apiKey: config.captchaApiKey },
+      nineRouter: { url: process.env.NINEROUTER_URL || PROJECT_CONFIG.nineRouter?.url, key: process.env.NINEROUTER_KEY || PROJECT_CONFIG.nineRouter?.key, model: PROJECT_CONFIG.nineRouter?.model },
       xiaomi: { inviteCode: ref, referralLink: `https://platform.xiaomimimo.com/?ref=${encodeURIComponent(ref)}`,
         password: config.password, betaApplication: "MiMo-V2.5-Pro-UltraSpeed" },
       browser: { headless: config.headless, timeout: 60000, screenshots: false },
@@ -285,14 +289,84 @@ async function runMimoBatch(batchId, config) {
     let email = null, apiKey = null, passToken = null, cUserId = null, userId = null;
 
     try {
-      const tmpReg = new MimoRegistration(iterConfig);
-      email = await tmpReg.tempmail.createInbox();
+      if (useApiMode) {
+        // ── API mode ───────────────────────────────────────
+        const { MimoApiRegistration } = await import("../src/core/mimo-api-registration.js");
+        const apiReg = new MimoApiRegistration(iterConfig);
+        const result = await apiReg.run();
+        email = result.email;
+        apiKey = result.apiKey;
+        passToken = result.passToken;
+        cUserId = result.cUserId;
+        userId = result.userId;
+
+        // Forward API logs to batch log
+        if (result.logs) {
+          for (const line of result.logs) {
+            addLog(batchId, `${tag} ${line.replace(/^\[[\d:]+\]\s*/, '')}`);
+          }
+        }
+
+        if (apiKey) {
+          addLog(batchId, `${tag} ✅ Account ${idx + 1} success (API) — ${email}`);
+          batch.progress.success++;
+          saveBatchResult(batchId, { email, password: config.password, apiKey, passToken, cUserId, userId, ultraspeed: true });
+          appendMasterKey({ email, password: config.password, apiKey, cookies: { passToken, cUserId, userId }, provider: "mimo" });
+          return { ok: true };
+        } else if (passToken) {
+          // Got session but no API key — try to create via platform REST
+          addLog(batchId, `${tag} ⚠ Got session cookies, trying platform REST for API key...`);
+          try {
+            const platRes = await fetch(`https://platform.xiaomimimo.com/api/v1/keys`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "Cookie": `passToken=${passToken}; cUserId=${cUserId || ""}; userId=${userId || ""}`,
+              },
+              body: JSON.stringify({ name: "mykey" }),
+            });
+            const platText = await platRes.text().catch(() => "");
+            addLog(batchId, `${tag} Platform /api/v1/keys: ${platRes.status} — ${platText.substring(0, 150)}`);
+            let platData = {};
+            try { platData = JSON.parse(platText); } catch {}
+            const foundKey = platData.key || platData.apiKey || platData.data?.key;
+            if (foundKey) {
+              apiKey = foundKey;
+              addLog(batchId, `${tag} ✅ API key created via platform REST`);
+            }
+          } catch (e) {
+            addLog(batchId, `${tag} Platform REST error: ${e.message}`);
+          }
+
+          if (apiKey) {
+            batch.progress.success++;
+            saveBatchResult(batchId, { email, password: config.password, apiKey, passToken, cUserId, userId, ultraspeed: true });
+            appendMasterKey({ email, password: config.password, apiKey, cookies: { passToken, cUserId, userId }, provider: "mimo" });
+            return { ok: true };
+          }
+        }
+
+        // API mode failed — report error, do NOT fall back to browser
+        addLog(batchId, `${tag} ❌ API mode failed — ${result.error || "no key obtained"}`);
+        batch.progress.failed++;
+        saveBatchResult(batchId, { email, password: config.password, ultraspeed: false, error: result.error || "API mode: no key" });
+        return { ok: false };
+      }
+
+      // ── Browser mode (original flow or API fallback) ─────
+      const { MimoRegistration } = await import("../src/core/registration.js");
+      const { generateFingerprint, buildInitScript, buildExtraHeaders } = await import("../src/browser/fingerprint.js");
+      const { chromium } = await import("playwright");
+
+      if (!email) {
+        const tmpReg = new MimoRegistration(iterConfig);
+        email = await tmpReg.tempmail.createInbox();
+      }
       addLog(batchId, `${tag} Email: ${email}`);
       const fp = generateFingerprint();
       addLog(batchId, `${tag} Chrome ${fp.chromeMajor}`);
 
-      // ── Proxy retry loop: try up to 3 different proxies + direct fallback ──
-      const maxAttempts = useProxy ? 4 : 1; // 3 proxies + 1 direct
+      const maxAttempts = useProxy ? 4 : 1;
       let connected = false;
       let lastErr = null;
 
@@ -300,22 +374,22 @@ async function runMimoBatch(batchId, config) {
         let proxyObj = null;
         if (useProxy && attempt < 3) {
           proxyObj = await pickWorkingProxy(config.proxies, msg => addLog(batchId, `${tag} ${msg}`));
-          if (!proxyObj) { addLog(batchId, `${tag} No working proxy, trying direct`); }
+          if (!proxyObj) addLog(batchId, `${tag} No working proxy, trying direct`);
         } else if (useProxy && attempt === 3) {
           addLog(batchId, `${tag} Falling back to direct connection`);
         }
 
         const reg = new MimoRegistration(iterConfig);
+        if (!reg.tempmail) reg.tempmail = new (await import("../src/clients/tempmail.js")).TempmailClient(config.tempmailUrl);
         let tunnel = null;
         try {
           const chromeArgs = buildChromeArgs(fp, !!proxyObj);
           const launchOpts = { headless: config.headless, channel: "chrome", args: chromeArgs };
           if (proxyObj) {
             if (proxyObj.username && proxyObj.password) {
-              // SOCKS5 auth not supported by Chromium — create local tunnel
               tunnel = await startTunnel(proxyObj);
               launchOpts.proxy = { server: `socks5://127.0.0.1:${tunnel.port}` };
-              addLog(batchId, `${tag} Tunnel: 127.0.0.1:${tunnel.port} -> ${proxyObj.server.replace(/^(socks[45]|http):\/\//, "")}`);
+              addLog(batchId, `${tag} Tunnel: 127.0.0.1:${tunnel.port}`);
             } else {
               launchOpts.proxy = proxyObj;
             }
@@ -330,14 +404,11 @@ async function runMimoBatch(batchId, config) {
           });
           await ctx.addInitScript({ content: buildInitScript(fp) });
           reg.page = await ctx.newPage();
-          const origSS = reg.page.screenshot.bind(reg.page);
-          reg.page.screenshot = async (opts = {}) => { if (opts?.path?.includes("error")) return origSS(opts); return Buffer.alloc(0); };
 
           if (proxyObj) addLog(batchId, `${tag} Proxy: ${proxyObj.server.replace(/^(socks[45]|http):\/\//, "")}`);
           addLog(batchId, `${tag} Navigating...`);
           await reg.page.goto(iterConfig.xiaomi.referralLink, { waitUntil: "networkidle", timeout: 60000 });
 
-          // Navigation succeeded — continue with rest of flow
           addLog(batchId, `${tag} Filling form...`);
           await reg.fillRegistrationForm(email);
           addLog(batchId, `${tag} Submitting...`);
@@ -352,23 +423,20 @@ async function runMimoBatch(batchId, config) {
           addLog(batchId, `${tag} Creating API key...`);
           try { apiKey = await reg.createApiKey(); } catch (e) { addLog(batchId, `${tag} API key error: ${e.message}`); }
           addLog(batchId, `${tag} Filling Ultraspeed...`);
-          try { await reg.fillUltraspeedForm(email); } catch (e) { try { addLog(batchId, `${tag} Ultraspeed error: ${String(e?.message || e)}`); } catch {} }
+          try { await reg.fillUltraspeedForm(email); } catch (e) { addLog(batchId, `${tag} Ultraspeed error: ${String(e?.message || e)}`); }
 
           try {
             const cookies = await reg.page.context().cookies();
-            passToken = cookies.find(c => c.name === "passToken")?.value || null;
-            cUserId = cookies.find(c => c.name === "cUserId")?.value || null;
-            userId = cookies.find(c => c.name === "userId")?.value || null;
+            passToken = cookies.find(c => c.name === "passToken")?.value || passToken;
+            cUserId = cookies.find(c => c.name === "cUserId")?.value || cUserId;
+            userId = cookies.find(c => c.name === "userId")?.value || userId;
           } catch {}
           connected = true;
-          try { addLog(batchId, `${tag} Loop done — connected=${connected}, apiKey=${apiKey ? "yes" : "null"}`); } catch {}
         } catch (err) {
           lastErr = err;
-          try { addLog(batchId, `${tag} Error detail: ${String(err?.message || err).substring(0, 300)}`); } catch (logErr) { console.error("addLog failed:", logErr); }
+          addLog(batchId, `${tag} Error: ${String(err?.message || err).substring(0, 200)}`);
           const isConnErr = /ERR_CONNECTION|ERR_CERT|ERR_PROXY|net::|ECONNRESET|ECONNREFUSED|tunnel|CERT_AUTHORITY/i.test(err?.message || "");
-          if (isConnErr && attempt < maxAttempts - 1) {
-            try { addLog(batchId, `${tag} ⚠ Connection error, trying next proxy...`); } catch {}
-          }
+          if (isConnErr && attempt < maxAttempts - 1) addLog(batchId, `${tag} ⚠ Connection error, trying next proxy...`);
         } finally {
           if (reg.browser) await reg.browser.close().catch(() => {});
           if (tunnel) { try { tunnel.close(); } catch {} }
@@ -377,28 +445,25 @@ async function runMimoBatch(batchId, config) {
 
       if (!connected) throw lastErr || new Error("Failed to connect after all attempts");
 
-      try { addLog(batchId, `${tag} API key result: ${apiKey ? "obtained" : "null"}, connected: ${connected}`); } catch {}
       if (apiKey) {
-        try { addLog(batchId, `${tag} ✅ Account ${idx + 1} success — ${email}`); } catch {}
+        addLog(batchId, `${tag} ✅ Account ${idx + 1} success — ${email}`);
         batch.progress.success++;
-        try { saveBatchResult(batchId, { email, password: config.password, apiKey, passToken, cUserId, userId, ultraspeed: true }); } catch (saveErr) { console.error("saveBatchResult failed:", saveErr); }
-        // Also save to master keys
-        try { appendMasterKey({ email, password: config.password, apiKey, cookies: { passToken, cUserId, userId }, provider: "mimo" }); } catch {}
+        saveBatchResult(batchId, { email, password: config.password, apiKey, passToken, cUserId, userId, ultraspeed: true });
+        appendMasterKey({ email, password: config.password, apiKey, cookies: { passToken, cUserId, userId }, provider: "mimo" });
         return { ok: true };
       } else {
-        try { addLog(batchId, `${tag} ❌ Account ${idx + 1} failed — no API key`); } catch {}
+        addLog(batchId, `${tag} ❌ Account ${idx + 1} failed — no API key`);
         batch.progress.failed++;
-        try { saveBatchResult(batchId, { email, password: config.password, ultraspeed: false, error: "No API key obtained" }); } catch {}
+        saveBatchResult(batchId, { email, password: config.password, ultraspeed: false, error: "No API key obtained" });
         return { ok: false };
       }
     } catch (err) {
       const errMsg = String(err?.message || err || "unknown");
       const isRetryable = /captcha|CAPTCHA|unsolvable|timeout|ECONNREFUSED|ETIMEDOUT|proxy|restrict/i.test(errMsg);
-      try { addLog(batchId, `${tag} OUTER CATCH: ${errMsg.substring(0, 200)} | retryable=${isRetryable}`); } catch {}
-      if (isRetryable) { try { addLog(batchId, `${tag} ⚠ Account ${idx + 1} error, retrying...`); } catch {} return { ok: false, retry: true }; }
-      try { addLog(batchId, `${tag} ❌ Account ${idx + 1} error: ${errMsg.substring(0, 200)}`); } catch {}
+      if (isRetryable) { addLog(batchId, `${tag} ⚠ Account ${idx + 1} error, retrying...`); return { ok: false, retry: true }; }
+      addLog(batchId, `${tag} ❌ Account ${idx + 1} error: ${errMsg.substring(0, 200)}`);
       batch.progress.failed++;
-      try { saveBatchResult(batchId, { email, password: config.password, ultraspeed: false, error: errMsg }); } catch {}
+      saveBatchResult(batchId, { email, password: config.password, ultraspeed: false, error: errMsg });
       return { ok: false, retry: false };
     }
   }
@@ -414,7 +479,6 @@ async function runMimoBatch(batchId, config) {
             if (retries < 3) {
               retryCount.set(idx, retries + 1);
               addLog(batchId, `[T${threadId}] ↻ Retry ${retries + 1}/3`);
-              // Put this account back into the queue
               nextIdx = idx;
             } else {
               addLog(batchId, `[T${threadId}] ❌ Max retries reached`);
@@ -473,7 +537,7 @@ async function runQwenBatch(batchId, config) {
 
       const qwenConfig = {
         browser: { headless: config.headless, timeout: 60000 },
-        tempmail: { apiUrl: config.tempmailUrl || "https://tempik.hindiabelanda.my.id/api" },
+        tempmail: { apiUrl: config.tempmailUrl || "https://tempik.sutros.my.id/api" },
       };
 
       const reg = new QwenRegistration(qwenConfig);
@@ -794,14 +858,14 @@ const server = http.createServer(async (req, res) => {
     const sf = join(__dirname, "..", "db", "tempmail-session.json");
     if (!existsSync(sf)) return sendJSON(req, res, []);
     const { sessionId } = JSON.parse(readFileSync(sf, "utf8"));
-    try { const r = await fetch(`https://tempik.hindiabelanda.my.id/api/inboxes`, { headers: { "Content-Type": "application/json", "x-session-id": sessionId } }); return sendJSON(req, res, await r.json()); } catch (e) { return sendJSON(req, res, { error: e.message }, 500); }
+    try { const r = await fetch(`https://tempik.sutros.my.id/api/inboxes`, { headers: { "Content-Type": "application/json", "x-session-id": sessionId } }); return sendJSON(req, res, await r.json()); } catch (e) { return sendJSON(req, res, { error: e.message }, 500); }
   }
   if (req.method === "GET" && url.pathname === "/api/tempmail/messages") {
     const addr = url.searchParams.get("addr"); if (!addr) return sendJSON(req, res, { error: "addr required" }, 400);
     const sf = join(__dirname, "..", "db", "tempmail-session.json");
     if (!existsSync(sf)) return sendJSON(req, res, []);
     const { sessionId } = JSON.parse(readFileSync(sf, "utf8"));
-    try { const r = await fetch(`https://tempik.hindiabelanda.my.id/api/inboxes/${encodeURIComponent(addr)}/messages`, { headers: { "Content-Type": "application/json", "x-session-id": sessionId } }); return sendJSON(req, res, await r.json()); } catch (e) { return sendJSON(req, res, { error: e.message }, 500); }
+    try { const r = await fetch(`https://tempik.sutros.my.id/api/inboxes/${encodeURIComponent(addr)}/messages`, { headers: { "Content-Type": "application/json", "x-session-id": sessionId } }); return sendJSON(req, res, await r.json()); } catch (e) { return sendJSON(req, res, { error: e.message }, 500); }
   }
 
   res.writeHead(404); res.end("Not found");

@@ -6,6 +6,7 @@ import { Play, Settings, Loader2, Monitor, Eye, ChevronDown, ChevronUp, Zap, Glo
 
 interface BatchConfig {
   generator: "mimo";
+  mode: "api" | "browser";
   count: number;
   headless: boolean;
   threads: number;
@@ -64,6 +65,7 @@ function CustomSelect({ value, onChange, options }: {
 export function ConfigPanel({ onStart, isRunning }: ConfigPanelProps) {
   const [config, setConfig] = useState<BatchConfig>({
     generator: "mimo",
+    mode: "api",
     count: 3,
     headless: true,
     threads: 1,
@@ -71,7 +73,7 @@ export function ConfigPanel({ onStart, isRunning }: ConfigPanelProps) {
     password: "Arkan123!",
     captchaProvider: "capmonster",
     captchaApiKey: "fb46ddaf60bad7dbc5066308a5b73349",
-    tempmailUrl: "https://tempik.hindiabelanda.my.id/api",
+    tempmailUrl: "https://tempik.sutros.my.id/api",
     country: "",
     proxies: "",
   });
@@ -104,11 +106,21 @@ export function ConfigPanel({ onStart, isRunning }: ConfigPanelProps) {
             className="w-full h-10 px-3 rounded-xl bg-muted/50 border border-border/50 text-sm font-mono focus:outline-none focus:border-foreground/30 transition-colors" />
         </div>
 
-        {/* Headless */}
+        {/* Mode + Headless */}
+        <div className="space-y-1.5">
+          <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Mode</label>
+          <button type="button" onClick={() => update("mode", config.mode === "api" ? "browser" : "api")}
+            className={`w-full h-10 px-3 rounded-xl border text-sm font-mono flex items-center justify-center gap-2 transition-colors ${
+              config.mode === "api" ? "bg-emerald-500/10 border-emerald-500/30 text-emerald-400" : "bg-amber-500/10 border-amber-500/30 text-amber-400"
+            }`}>
+            {config.mode === "api" ? <Zap className="w-3.5 h-3.5" /> : <Monitor className="w-3.5 h-3.5" />}
+            {config.mode === "api" ? "API" : "Browser"}
+          </button>
+        </div>
         <div className="space-y-1.5">
           <label className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider">Browser</label>
           <button type="button" onClick={() => update("headless", !config.headless)}
-            className={`w-full h-10 px-3 rounded-xl border text-sm font-medium flex items-center justify-center gap-2 transition-colors ${
+            className={`w-full h-10 px-3 rounded-xl border text-sm font-mono flex items-center justify-center gap-2 transition-colors ${
               config.headless ? "bg-muted/50 border-border/50 text-muted-foreground" : "bg-foreground/10 border-foreground/20 text-foreground"
             }`}>
             {config.headless ? <Eye className="w-3.5 h-3.5" /> : <Monitor className="w-3.5 h-3.5" />}
