@@ -711,6 +711,8 @@ const server = http.createServer(async (req, res) => {
       const batch = validAccounts.slice(batchIdx, batchIdx + BATCH_SIZE);
 
       try {
+        console.log(`[Checker] Batch ${Math.floor(batchIdx/BATCH_SIZE)+1}: sending ${batch.length} accounts to ${CHECKER_API}`);
+        console.log(`[Checker] Sample: ${JSON.stringify(batch[0]).substring(0, 200)}`);
         const submitResp = await fetch(CHECKER_API, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -731,8 +733,10 @@ const server = http.createServer(async (req, res) => {
           signal: AbortSignal.timeout(30000),
         });
 
+        console.log(`[Checker] Response: HTTP ${submitResp.status}`);
         if (!submitResp.ok) {
           const errText = await submitResp.text().catch(() => "unknown");
+          console.log(`[Checker] Error body: ${errText.substring(0, 300)}`);
           for (const a of batch) {
             allResults.push({ email: a.email, status: "Error", error: `API ${submitResp.status}: ${errText.substring(0, 100)}`, balance: null, gift: null, frozen: null, cash: null });
             errCount++;
