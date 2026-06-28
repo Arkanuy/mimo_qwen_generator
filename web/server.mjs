@@ -674,102 +674,84 @@ const server = http.createServer(async (req, res) => {
     return sendJSON(req, res, { keys: successKeys, total: successKeys.length });
   }
 
-  // Checker API — check MiMo account balance using single browser + multi-context
+  // Checker API — check MiMo account balance using HTTP + cookies
   if (req.method === "POST" && url.pathname === "/api/checker") {
     if (!isAdmin(req)) return sendJSON(req, res, { error: "Unauthorized" }, 401);
     const body = await parseBody(req);
     const accounts = body.accounts || [];
     const results = [];
 
-    const { chromium } = await import('playwright');
-    let browser = null;
-    try {
-      browser = await chromium.launch({ headless: true, channel: "chrome", args: ["--disable-blink-features=AutomationControlled", "--no-sandbox"] });
-    } catch (e) {
-      return sendJSON(req, res, { error: `Failed to launch browser: ${e.message}`, results: [], totalBalance: 0, totalGift: 0, okCount: 0, errCount: accounts.length, checked: 0 });
-    }
-
     for (const acct of accounts) {
       const { email, apiKey, cookies } = acct;
       if (!cookies?.passToken || !cookies?.cUserId || !cookies?.userId) {
-        results.push({ email, status: "Error", error: "Missing cookie fields (need passToken, cUserId, userId)", balance: null, gift: null, frozen: null, cash: null });
+        results.push({ email, status: "Error", error: "Missing cookie fields", balance: null, gift: null, frozen: null, cash: null });
         continue;
       }
-      let ctx = null;
       try {
-        ctx = await browser.newContext();
-        await ctx.addCookies([
-          { name: "passToken", value: cookies.passToken, domain: ".xiaomimimo.com", path: "/" },
-          { name: "cUserId", value: cookies.cUserId, domain: ".xiaomimimo.com", path: "/" },
-          { name: "userId", value: cookies.userId, domain: ".xiaomimimo.com", path: "/" },
-        ]);
-        const page = await ctx.newPage();
+        const cookieStr = `passToken=${cookies.passToken}; cUserId=${cookies.cUserId}; userId=${cookies.userId}`;
+        // Hit the balance page with cookies
+        const resp = await fetch("https://platform.xiaomimimo.com/console/balance", {
+          headers: {
+            "Cookie": cookieStr,
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          },
+          redirect: "follow",
+          signal: AbortSignal.timeout(15000),
+        });
 
-        let navigated = false;
-        try {
-          await page.goto("https://platform.xiaomimimo.com/console/balance", { waitUntil: "domcontentloaded", timeout: 20000 });
-          navigated = true;
-        } catch (navErr) {
-          results.push({ email, status: "Error", error: `Navigation failed: ${navErr.message.split("\n")[0]}`, balance: null, gift: null, frozen: null, cash: null });
+        const html = await resp.text();
+
+        // Check for login redirect or error
+        if (html.includes("sso/login") || html.includes("Sign In") || resp.url?.includes("login")) {
+          results.push({ email, status: "Error", error: "Session expired", balance: null, gift: null, frozen: null, cash: null });
           continue;
         }
 
-        if (navigated) {
-          // Check if redirected to login
-          const curUrl = page.url();
-          if (curUrl.includes("login") || curUrl.includes("sso")) {
-            results.push({ email, status: "Error", error: "Session expired (redirected to login)", balance: null, gift: null, frozen: null, cash: null });
-            continue;
-          }
+        if (!resp.ok) {
+          results.push({ email, status: "Error", error: `HTTP ${resp.status}`, balance: null, gift: null, frozen: null, cash: null });
+          continue;
+        }
 
-          await page.waitForTimeout(4000);
+        // Parse balance from HTML — strip tags, find $X.XX patterns
+        const text = html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+        let balance = null, gift = null, frozen = null, cash = null;
 
-          const balanceData = await page.evaluate(() => {
-            const text = document.body.innerText || "";
-            const lines = text.split(/\r?\n/);
-            let balance = null, gift = null, frozen = null, cash = null;
+        // Look for "Balance" label followed by dollar amount
+        const balM = text.match(/Balance[^$]*\$\s*([0-9]+\.[0-9]{2})/i);
+        if (balM) balance = parseFloat(balM[1]);
 
-            for (let i = 0; i < lines.length - 1; i++) {
-              const line = lines[i].trim();
-              if (/^balance$/i.test(line)) {
-                for (let j = i + 1; j < Math.min(i + 3, lines.length); j++) {
-                  const m = lines[j].match(/\$\s*([0-9]+\.[0-9]{2})/);
-                  if (m) { balance = parseFloat(m[1]); break; }
-                }
-              }
-            }
+        const cashM = text.match(/cash\s*balance[^$]*\$\s*([0-9]+\.[0-9]{2})/i);
+        if (cashM) cash = parseFloat(cashM[1]);
 
-            const cashM = text.match(/cash\s*balance\s*[:\s]*\$\s*([0-9]+\.[0-9]{2})/i);
-            const bonusM = text.match(/bonus\s*balance\s*[:\s]*\$\s*([0-9]+\.[0-9]{2})/i);
-            if (cashM) cash = parseFloat(cashM[1]);
-            if (bonusM) gift = parseFloat(bonusM[1]);
-            if (balance === null && cash !== null && gift !== null) balance = cash + gift;
-            if (balance === null) {
-              const all = [...text.matchAll(/\$\s*([0-9]+\.[0-9]{2})/g)].map(m => parseFloat(m[1])).filter(n => n > 0 && n < 50);
-              if (all.length > 0) balance = Math.min(...all);
-            }
-            return { balance, gift, frozen, cash };
-          }).catch(() => ({ balance: null, gift: null, frozen: null, cash: null }));
+        const bonusM = text.match(/bonus\s*balance[^$]*\$\s*([0-9]+\.[0-9]{2})/i);
+        if (bonusM) gift = parseFloat(bonusM[1]);
 
-          if (balanceData.balance !== null) {
-            results.push({ email, status: "OK", ...balanceData, apiKey: apiKey?.substring(0, 12) + "..." });
-          } else {
-            results.push({ email, status: "Error", error: "Could not parse balance from page", balance: null, gift: null, frozen: null, cash: null });
-          }
+        if (balance === null && cash !== null && gift !== null) balance = cash + gift;
+
+        // Fallback: smallest $X.XX < $50
+        if (balance === null) {
+          const all = [...text.matchAll(/\$([0-9]+\.[0-9]{2})/g)]
+            .map(m => parseFloat(m[1])).filter(n => n > 0 && n < 50);
+          if (all.length > 0) balance = Math.min(...all);
+        }
+
+        if (balance !== null) {
+          results.push({ email, status: "OK", balance, gift, frozen, cash, apiKey: apiKey?.substring(0, 12) + "..." });
+        } else {
+          results.push({ email, status: "Error", error: "Could not parse balance (page may need JS)", balance: null, gift: null, frozen: null, cash: null });
         }
       } catch (e) {
-        results.push({ email, status: "Error", error: e.message.split("\n")[0], balance: null, gift: null, frozen: null, cash: null });
-      } finally {
-        if (ctx) await ctx.close().catch(() => {});
+        results.push({ email, status: "Error", error: e.message?.substring(0, 100), balance: null, gift: null, frozen: null, cash: null });
       }
     }
-    if (browser) await browser.close().catch(() => {});
     const totalBalance = results.filter(r => r.balance != null).reduce((s, r) => s + (parseFloat(r.balance) || 0), 0);
     const totalGift = results.filter(r => r.gift != null).reduce((s, r) => s + (parseFloat(r.gift) || 0), 0);
     const okCount = results.filter(r => r.status === "OK").length;
     const errCount = results.filter(r => r.status === "Error").length;
     return sendJSON(req, res, { results, totalBalance, totalGift, okCount, errCount, checked: results.length });
   }
+
 
   // Download master keys as txt or json
   if (req.method === "GET" && url.pathname === "/api/master-keys/download") {
