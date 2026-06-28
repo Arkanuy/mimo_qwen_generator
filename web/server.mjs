@@ -779,16 +779,22 @@ const server = http.createServer(async (req, res) => {
         }
 
         // Poll for results
+        console.log(`[Checker] Polling queueId: ${queueId}`);
         let results = null;
         for (let i = 0; i < 90; i++) {
           await new Promise(r => setTimeout(r, 2000));
           try {
-            const statusResp = await fetch(`${STATUS_API}/${queueId}`, {
+            const statusUrl = `${STATUS_API}/${queueId}`;
+            const statusResp = await fetch(statusUrl, {
               headers: { "Accept": "application/json" },
               signal: AbortSignal.timeout(10000),
             });
-            if (!statusResp.ok) continue;
+            if (!statusResp.ok) {
+              console.log(`[Checker] Poll ${i+1}: HTTP ${statusResp.status}`);
+              continue;
+            }
             const statusData = await statusResp.json();
+            console.log(`[Checker] Poll ${i+1}: status=${statusData.status}, results=${Array.isArray(statusData.results) ? statusData.results.length : 'N/A'}`);
 
             if (statusData.status === "done" || statusData.status === "completed" || statusData.results) {
               results = statusData.results || statusData.data || statusData;
