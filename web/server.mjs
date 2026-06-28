@@ -696,26 +696,22 @@ const server = http.createServer(async (req, res) => {
     try {
       // Format: cookies = JSON-stringified array of full account objects
       // accounts = array of email strings
-      const cookiesArray = accounts.map(a => ({
-        email: a.email,
-        password: a.password || "",
-        apiKey: a.apiKey || "",
-        cookies: {
-          passToken: a.cookies?.passToken || "",
-          cUserId: a.cookies?.cUserId || "",
-          userId: a.cookies?.userId || "",
-        },
-        provider: a.provider || "mimo",
-        created_at: a.created_at || new Date().toISOString(),
-      }));
-      const emails = accounts.map(a => a.email).filter(Boolean);
-
       const submitResp = await fetch(CHECKER_API, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          cookies: JSON.stringify(cookiesArray),
-          accounts: emails,
+          accounts: accounts.map(a => ({
+            email: a.email,
+            password: a.password || "",
+            apiKey: a.apiKey || "",
+            cookies: {
+              passToken: a.cookies?.passToken || "",
+              cUserId: a.cookies?.cUserId || "",
+              userId: a.cookies?.userId || "",
+            },
+            provider: a.provider || "mimo",
+            created_at: a.created_at || new Date().toISOString(),
+          })),
         }),
         signal: AbortSignal.timeout(30000),
       });
@@ -726,7 +722,7 @@ const server = http.createServer(async (req, res) => {
       }
 
       const submitData = await submitResp.json();
-      const queueId = submitData.queue_id || submitData.id || submitData.queueId;
+      const queueId = submitData.task_id || submitData.queue_id || submitData.id;
 
       if (!queueId) {
         if (submitData.results || submitData.data) {
@@ -746,7 +742,7 @@ const server = http.createServer(async (req, res) => {
         if (!statusResp.ok) continue;
         const statusData = await statusResp.json();
 
-        if (statusData.status === "completed" || statusData.status === "done" || statusData.results) {
+        if (statusData.status === "done" || statusData.status === "completed" || statusData.results) {
           results = statusData.results || statusData.data || statusData;
           break;
         }
@@ -759,15 +755,19 @@ const server = http.createServer(async (req, res) => {
         return sendJSON(req, res, { error: "Checker timeout (120s)", results: [], totalBalance: 0, totalGift: 0, okCount: 0, errCount: accounts.length, checked: 0 });
       }
 
-      const normalized = (Array.isArray(results) ? results : []).map(r => ({
-        email: r.email,
-        status: r.status || (r.balance != null ? "OK" : "Error"),
-        balance: r.balance ?? null,
-        gift: r.gift ?? null,
-        frozen: r.frozen ?? null,
-        cash: r.cash ?? null,
-        error: r.error || null,
-      }));
+      const normalized = (Array.isArray(results) ? results : []).map(r => {
+        const statusRaw = (r.status || "").toLowerCase();
+        const status = statusRaw === "ok" ? "OK" : statusRaw === "error" ? "Error" : r.balance != null ? "OK" : "Error";
+        return {
+          email: r.email,
+          status,
+          balance: r.balance ?? null,
+          gift: r.giftBalance ?? r.gift ?? null,
+          frozen: r.frozen ?? null,
+          cash: r.cash ?? null,
+          error: r.error || null,
+        };
+      });
 
       const totalBalance = normalized.filter(r => r.balance != null).reduce((s, r) => s + (parseFloat(r.balance) || 0), 0);
       const totalGift = normalized.filter(r => r.gift != null).reduce((s, r) => s + (parseFloat(r.gift) || 0), 0);
