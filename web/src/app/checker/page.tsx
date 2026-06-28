@@ -1,13 +1,13 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import { useRouter } from "next/navigation";
 import { getMe } from "@/lib/auth";
 import { ShieldCheck, ArrowLeft, Loader2, CheckCircle, XCircle, DollarSign, Gift, RefreshCw, Upload } from "lucide-react";
 
 interface CheckResult {
   email: string;
-  status: "OK" | "Error";
+  status: string;
   balance: number | null;
   gift: number | null;
   frozen: number | null;
@@ -40,10 +40,12 @@ export default function CheckerPage() {
   const router = useRouter();
   const [results, setResults] = useState<CheckResult[]>([]);
   const [checking, setChecking] = useState(false);
+  const [progress, setProgress] = useState({ done: 0, total: 0 });
   const [statusText, setStatusText] = useState("");
   const [summary, setSummary] = useState({ totalBalance: 0, totalGift: 0, okCount: 0, errCount: 0 });
   const [authChecked, setAuthChecked] = useState(false);
   const [accounts, setAccounts] = useState<MasterKey[]>([]);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
     getMe().then(r => {
@@ -51,6 +53,7 @@ export default function CheckerPage() {
       setAuthChecked(true);
       loadMasterKeys();
     });
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, []);
 
   const loadMasterKeys = async () => {
@@ -70,7 +73,7 @@ export default function CheckerPage() {
         const data = JSON.parse(ev.target?.result as string);
         const arr = Array.isArray(data) ? data : [data];
         setAccounts(arr.filter((k: any) => k.cookies?.passToken || k.apiKey));
-      } catch { alert("Invalid JSON file"); }
+      } catch { alert("Invalid JSON"); }
     };
     reader.readAsText(file);
   };
@@ -79,9 +82,12 @@ export default function CheckerPage() {
     if (accounts.length === 0) return;
     setChecking(true);
     setResults([]);
-    setStatusText("Submitting to checker...");
+    setProgress({ done: 0, total: 0 });
     setSummary({ totalBalance: 0, totalGift: 0, okCount: 0, errCount: 0 });
+    setStatusText("Submitting...");
 
+    // Submit to server → get queueId
+    let queueId: string;
     try {
       const resp = await fetch("/api/checker", {
         method: "POST",
@@ -89,38 +95,81 @@ export default function CheckerPage() {
         body: JSON.stringify({ accounts }),
       });
       const data = await resp.json();
-
       if (data.error) {
         setStatusText(`Error: ${data.error}`);
         setChecking(false);
         return;
       }
-
-      if (data.results) {
-        setResults(data.results);
-        setSummary({
-          totalBalance: data.totalBalance || 0,
-          totalGift: data.totalGift || 0,
-          okCount: data.okCount || 0,
-          errCount: data.errCount || 0,
-        });
-        setStatusText(`Done — ${data.okCount || 0} OK, ${data.errCount || 0} failed`);
-      }
+      queueId = data.queueId;
+      setProgress({ done: 0, total: data.total || accounts.length });
+      setStatusText(`Queue: ${queueId} — checking...`);
     } catch (e: any) {
-      setStatusText(`Request failed: ${e.message}`);
+      setStatusText(`Submit failed: ${e.message}`);
+      setChecking(false);
+      return;
     }
-    setChecking(false);
+
+    // Poll external API directly
+    const STATUS_URL = `https://apikey.jimixz.tech/api/status/${queueId}`;
+    pollRef.current = setInterval(async () => {
+      try {
+        const resp = await fetch(STATUS_URL);
+        const data = await resp.json();
+
+        if (data.progress) {
+          setProgress({ done: data.progress.done || 0, total: data.progress.total || 0 });
+          setStatusText(`Checking... ${data.progress.done || 0}/${data.progress.total || 0}`);
+        }
+
+        if (data.status === "done" || data.status === "completed") {
+          if (pollRef.current) clearInterval(pollRef.current);
+
+          const rawResults = data.results || [];
+          const normalized: CheckResult[] = rawResults.map((r: any) => {
+            const bal = parseFloat(r.balance) || 0;
+            const gift = parseFloat(r.giftBalance || r.gift || "0") || 0;
+            const frozen = parseFloat(r.frozenBalance || r.frozen || "0") || 0;
+            const cash = parseFloat(r.cashBalance || r.cash || "0") || 0;
+            return {
+              email: r.email,
+              status: (r.status || "").toLowerCase() === "ok" ? "OK" : "Error",
+              balance: bal || null,
+              gift: gift || null,
+              frozen: frozen || null,
+              cash: cash || null,
+              error: r.error || null,
+            };
+          });
+
+          const totalBalance = normalized.reduce((s, r) => s + (parseFloat(String(r.balance)) || 0), 0);
+          const totalGift = normalized.reduce((s, r) => s + (parseFloat(String(r.gift)) || 0), 0);
+          const okCount = normalized.filter(r => r.status === "OK").length;
+          const errCount = normalized.filter(r => r.status === "Error").length;
+
+          setResults(normalized);
+          setSummary({ totalBalance, totalGift, okCount, errCount });
+          setStatusText(`Done — ${okCount} OK, ${errCount} failed`);
+          setChecking(false);
+        }
+
+        if (data.status === "failed" || data.status === "error") {
+          if (pollRef.current) clearInterval(pollRef.current);
+          setStatusText(`Checker failed: ${data.error || "unknown"}`);
+          setChecking(false);
+        }
+      } catch {}
+    }, 2000);
   }, [accounts]);
 
   const usdToIdr = (usd: number) => Math.round(usd * 17900);
   const estTokens = (balanceUsd: number, pricePer1M: number) => Math.floor((balanceUsd / pricePer1M) * 1_000_000);
+  const progressPct = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
 
   if (!authChecked) return null;
 
   return (
     <div className="min-h-screen bg-background text-foreground p-6">
       <div className="max-w-6xl mx-auto space-y-6">
-        {/* Header */}
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-3">
             <button onClick={() => router.push("/")} className="p-2 rounded-lg hover:bg-muted transition-colors">
@@ -132,7 +181,6 @@ export default function CheckerPage() {
           <span className="text-sm text-muted-foreground">{accounts.length} accounts</span>
         </div>
 
-        {/* Upload + Load */}
         <div className="flex gap-3">
           <label className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-muted hover:bg-muted/80 cursor-pointer text-sm transition-colors">
             <Upload className="w-4 h-4" /> Upload JSON
@@ -143,7 +191,6 @@ export default function CheckerPage() {
           </button>
         </div>
 
-        {/* Pricing */}
         <div className="rounded-xl border border-border/50 p-5 space-y-3">
           <h2 className="text-sm font-semibold">Model Pricing Info</h2>
           <div className="grid grid-cols-2 gap-4">
@@ -166,18 +213,29 @@ export default function CheckerPage() {
           </div>
         </div>
 
-        {/* Run + Progress */}
         <div className="flex items-center gap-4">
           <button onClick={runChecker} disabled={checking || accounts.length === 0}
             className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-foreground text-background text-sm font-medium disabled:opacity-50 transition-colors hover:opacity-90">
-            {checking ? <><Loader2 className="w-4 h-4 animate-spin" /> Checking...</> :
-             results.length > 0 ? <><RefreshCw className="w-4 h-4" /> Check Again</> :
-             <><ShieldCheck className="w-4 h-4" /> Start Check ({accounts.length})</>}
+            {checking ? <><Loader2 className="w-4 h-4 animate-spin" /></> :
+             results.length > 0 ? <><RefreshCw className="w-4 h-4" /></> :
+             <><ShieldCheck className="w-4 h-4" /></>}
+            {checking ? ` Checking ${progress.done}/${progress.total}...` :
+             results.length > 0 ? " Check Again" :
+             ` Start Check (${accounts.length})`}
           </button>
-          {statusText && <span className="text-sm text-muted-foreground">{statusText}</span>}
+          {checking && (
+            <div className="flex-1 space-y-1">
+              <div className="h-2 bg-muted rounded-full overflow-hidden">
+                <div className="h-full bg-foreground transition-all duration-500 rounded-full" style={{ width: `${progressPct}%` }} />
+              </div>
+              <div className="text-xs text-muted-foreground text-right">{progressPct}% — {statusText}</div>
+            </div>
+          )}
+          {!checking && statusText && !statusText.startsWith("Checking") && (
+            <span className="text-sm text-muted-foreground">{statusText}</span>
+          )}
         </div>
 
-        {/* Summary */}
         {results.length > 0 && (
           <>
             <div className="grid grid-cols-4 gap-4">
@@ -200,7 +258,6 @@ export default function CheckerPage() {
               </div>
             </div>
 
-            {/* Token Estimation */}
             {summary.totalBalance > 0 && (
               <div className="rounded-xl border border-border/50 p-5 space-y-3">
                 <h2 className="text-sm font-semibold">Estimasi Remaining Token</h2>
@@ -224,7 +281,6 @@ export default function CheckerPage() {
               </div>
             )}
 
-            {/* Results Table */}
             <div className="rounded-xl border border-border/50 overflow-hidden">
               <table className="w-full text-sm">
                 <thead className="bg-muted/30">
@@ -261,7 +317,6 @@ export default function CheckerPage() {
               </table>
             </div>
 
-            {/* Errors */}
             {results.some(r => r.error) && (
               <div className="rounded-xl border border-red-500/20 bg-red-500/5 p-4 space-y-2">
                 <h3 className="text-sm font-semibold text-red-400">Detail Error</h3>
