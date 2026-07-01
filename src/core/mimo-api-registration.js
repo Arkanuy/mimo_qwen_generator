@@ -16,7 +16,7 @@
  *   6. Do serviceLogin to get passToken cookie
  */
 
-import { TempmailClient } from '../clients/tempmail.js';
+import { MocasusApiClient } from '../clients/mocasus-api-client.js';
 import { createCaptchaSolver } from '../clients/captcha.js';
 import { NineRouterCaptchaSolver } from '../clients/ninerouter-captcha.js';
 import { CapMonsterSolver } from '../clients/capmonster.js';
@@ -82,7 +82,7 @@ function md5(str) {
 export class MimoApiRegistration {
   constructor(config) {
     this.config = config;
-    this.tempmail = new TempmailClient(config.tempmail.apiUrl);
+    this.tempmail = new MocasusApiClient(config.tempmail?.apiBaseUrl);
     this.captcha = createCaptchaSolver(config.captcha);
     this.nineRouter = new NineRouterCaptchaSolver(config.nineRouter || {});
     this.capmonster = new CapMonsterSolver(config.captcha?.apiKey || '');

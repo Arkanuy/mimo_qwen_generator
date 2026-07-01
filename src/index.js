@@ -2,6 +2,7 @@
  * Barrel export — semua module dari src/.
  */
 
+export { MocasusApiClient } from './clients/mocasus-api-client.js';
 export { TempmailClient } from './clients/tempmail.js';
 export { CaptchaSolver, CapMonsterSolver, createCaptchaSolver } from './clients/captcha.js';
 export { MimoRegistration, isValidRefCode } from './core/registration.js';

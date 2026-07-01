@@ -30,7 +30,7 @@ const MODE = getArg('mode', 'api'); // api or browser
 const cfg = JSON.parse(readFileSync(join(__dirname, '..', 'config', 'default.json'), 'utf8'));
 
 const iterConfig = {
-  tempmail: { apiUrl: cfg.tempmail?.apiUrl || 'https://tempik.sutros.my.id/api' },
+  tempmail: { apiBaseUrl: cfg.tempmail?.apiBaseUrl || 'http://localhost:3030' },
   captcha: { provider: cfg.captcha?.provider, apiKey: cfg.captcha?.apiKey },
   nineRouter: {
     url: cfg.nineRouter?.url,

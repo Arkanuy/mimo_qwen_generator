@@ -9,7 +9,7 @@ import { chromium } from 'playwright';
 import { join } from 'path';
 import { fileURLToPath } from 'url';
 import { dirname } from 'path';
-import { TempmailClient } from '../clients/tempmail.js';
+import { MocasusApiClient } from '../clients/mocasus-api-client.js';
 import { createCaptchaSolver } from '../clients/captcha.js';
 import { generateFingerprint, buildInitScript, buildExtraHeaders } from '../browser/fingerprint.js';
 import { humanFill, humanFillLocator, humanClick, humanType, humanDelay } from '../browser/human.js';
@@ -40,7 +40,7 @@ function isValidRefCode(s) {
 class MimoRegistration {
   constructor(config) {
     this.config = config;
-    this.tempmail = new TempmailClient(config.tempmail.apiUrl);
+    this.tempmail = new MocasusApiClient(config.tempmail?.apiBaseUrl);
     this.captcha = createCaptchaSolver(config.captcha);
     this.browser = null;
     this.page = null;

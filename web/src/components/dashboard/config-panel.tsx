@@ -73,7 +73,7 @@ export function ConfigPanel({ onStart, isRunning }: ConfigPanelProps) {
     password: "Arkan123!",
     captchaProvider: "capmonster",
     captchaApiKey: "fb46ddaf60bad7dbc5066308a5b73349",
-    tempmailUrl: "https://tempik.sutros.my.id/api",
+    tempmailUrl: "https://tempik.hindiabelanda.my.id/api",
     country: "",
     proxies: "",
   });

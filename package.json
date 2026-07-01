@@ -8,7 +8,9 @@
     "start": "node scripts/chain-loop.js",
     "test": "node scripts/chain-loop.js --count 1",
     "bot": "node src/bot/index.js",
-    "chain": "node scripts/chain-loop.js"
+    "chain": "node scripts/chain-loop.js",
+    "mocasus-login": "node src/services/mocasus-browser.js",
+    "mocasus-api": "node src/services/mocasus-api.js"
   },
   "directories": {
     "src": "src/",
@@ -20,7 +22,13 @@
     "node-fetch": "^3.3.0",
     "telegraf": "^4.16.0"
   },
-  "keywords": ["xiaomi", "mimo", "automation", "registration", "telegram-bot"],
+  "keywords": [
+    "xiaomi",
+    "mimo",
+    "automation",
+    "registration",
+    "telegram-bot"
+  ],
   "author": "",
   "license": "MIT"
 }

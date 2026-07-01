@@ -12,6 +12,7 @@ import { readFileSync, existsSync, mkdirSync, writeFileSync, appendFileSync } fr
 import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 import crypto from "crypto";
+import { MocasusTempMail } from "../src/clients/mocasus-tempmail.js";
 
 
 const __filename = fileURLToPath(import.meta.url);
@@ -21,6 +22,13 @@ const __dirname = dirname(__filename);
 const PROJECT_ROOT = join(__dirname, "..");
 let PROJECT_CONFIG = {};
 try { PROJECT_CONFIG = JSON.parse(readFileSync(join(PROJECT_ROOT, "config", "default.json"), "utf8")); } catch {}
+
+// ── Mocasus TempMail client ──────────────────────────────
+const mocasusMail = new MocasusTempMail({
+  supabaseUrl: PROJECT_CONFIG.tempmail?.supabaseUrl,
+  anonKey: PROJECT_CONFIG.tempmail?.anonKey,
+  ownerToken: PROJECT_CONFIG.tempmail?.ownerToken,
+});
 
 // ── Paths ────────────────────────────────────────────────
 const DB_DIR = join(__dirname, "..", "db");
@@ -277,7 +285,7 @@ async function runMimoBatch(batchId, config) {
     batch.progress.current = Math.max(batch.progress.current, idx + 1);
 
     const iterConfig = {
-      tempmail: { apiUrl: config.tempmailUrl || PROJECT_CONFIG.tempmail?.apiUrl || "https://tempik.sutros.my.id/api" },
+      tempmail: { apiBaseUrl: PROJECT_CONFIG.tempmail?.apiBaseUrl || "http://localhost:3030" },
       captcha: { provider: config.captchaProvider, apiKey: config.captchaApiKey },
       nineRouter: { url: process.env.NINEROUTER_URL || PROJECT_CONFIG.nineRouter?.url, key: process.env.NINEROUTER_KEY || PROJECT_CONFIG.nineRouter?.key, model: PROJECT_CONFIG.nineRouter?.model },
       xiaomi: { inviteCode: ref, referralLink: `https://platform.xiaomimimo.com/?ref=${encodeURIComponent(ref)}`,
@@ -380,7 +388,7 @@ async function runMimoBatch(batchId, config) {
         }
 
         const reg = new MimoRegistration(iterConfig);
-        if (!reg.tempmail) reg.tempmail = new (await import("../src/clients/tempmail.js")).TempmailClient(config.tempmailUrl);
+        if (!reg.tempmail) reg.tempmail = new (await import("../src/clients/mocasus-api-client.js")).MocasusApiClient(PROJECT_CONFIG.tempmail?.apiBaseUrl || "http://localhost:3030");
         let tunnel = null;
         try {
           const chromeArgs = buildChromeArgs(fp, !!proxyObj);
@@ -537,7 +545,7 @@ async function runQwenBatch(batchId, config) {
 
       const qwenConfig = {
         browser: { headless: config.headless, timeout: 60000 },
-        tempmail: { apiUrl: config.tempmailUrl || "https://tempik.sutros.my.id/api" },
+        tempmail: { apiUrl: config.tempmailUrl || "https://tempik.hindiabelanda.my.id/api" },
       };
 
       const reg = new QwenRegistration(qwenConfig);
@@ -848,24 +856,40 @@ const server = http.createServer(async (req, res) => {
     setCors(req, res); res.writeHead(200, { "Content-Type": "application/json", "Content-Disposition": `attachment; filename="results.json"` }); return res.end(json);
   }
 
-  // Tempmail proxy
-  if (req.method === "GET" && url.pathname === "/api/tempmail/session") {
-    const sf = join(__dirname, "..", "db", "tempmail-session.json");
-    if (existsSync(sf)) return sendJSON(req, res, JSON.parse(readFileSync(sf, "utf8")));
-    return sendJSON(req, res, { sessionId: null });
+  // ── Mocasus TempMail API ────────────────────────────────
+  // GET /api/tempmail/email?domain=moymoy.me → generate email
+  if (req.method === "GET" && url.pathname === "/api/tempmail/email") {
+    try {
+      const domain = url.searchParams.get("domain") || null;
+      const result = domain
+        ? { email: await mocasusMail.createInbox(null, domain), password: null }
+        : await mocasusMail.generateEmailWithPassword();
+      return sendJSON(req, res, { ok: true, email: result.email, password: result.password });
+    } catch (e) { return sendJSON(req, res, { ok: false, error: e.message }, 500); }
   }
-  if (req.method === "GET" && url.pathname === "/api/tempmail/inboxes") {
-    const sf = join(__dirname, "..", "db", "tempmail-session.json");
-    if (!existsSync(sf)) return sendJSON(req, res, []);
-    const { sessionId } = JSON.parse(readFileSync(sf, "utf8"));
-    try { const r = await fetch(`https://tempik.sutros.my.id/api/inboxes`, { headers: { "Content-Type": "application/json", "x-session-id": sessionId } }); return sendJSON(req, res, await r.json()); } catch (e) { return sendJSON(req, res, { error: e.message }, 500); }
-  }
+  // GET /api/tempmail/messages?addr=xxx → get messages
   if (req.method === "GET" && url.pathname === "/api/tempmail/messages") {
     const addr = url.searchParams.get("addr"); if (!addr) return sendJSON(req, res, { error: "addr required" }, 400);
-    const sf = join(__dirname, "..", "db", "tempmail-session.json");
-    if (!existsSync(sf)) return sendJSON(req, res, []);
-    const { sessionId } = JSON.parse(readFileSync(sf, "utf8"));
-    try { const r = await fetch(`https://tempik.sutros.my.id/api/inboxes/${encodeURIComponent(addr)}/messages`, { headers: { "Content-Type": "application/json", "x-session-id": sessionId } }); return sendJSON(req, res, await r.json()); } catch (e) { return sendJSON(req, res, { error: e.message }, 500); }
+    try {
+      const wait = parseInt(url.searchParams.get("wait") || "180") * 1000;
+      const interval = parseInt(url.searchParams.get("interval") || "5") * 1000;
+      const messages = await mocasusMail.getMessages(addr, wait, interval);
+      return sendJSON(req, res, { ok: true, count: messages.length, messages });
+    } catch (e) { return sendJSON(req, res, { ok: false, error: e.message }, 500); }
+  }
+  // GET /api/tempmail/otp?addr=xxx → get OTP code
+  if (req.method === "GET" && url.pathname === "/api/tempmail/otp") {
+    const addr = url.searchParams.get("addr"); if (!addr) return sendJSON(req, res, { error: "addr required" }, 400);
+    try {
+      const wait = parseInt(url.searchParams.get("wait") || "180") * 1000;
+      const interval = parseInt(url.searchParams.get("interval") || "5") * 1000;
+      const otp = await mocasusMail.getOtp(addr, wait, interval);
+      return sendJSON(req, res, { ok: true, email: addr, otp });
+    } catch (e) { return sendJSON(req, res, { ok: false, error: e.message }, 500); }
+  }
+  // GET /api/tempmail/status → health check
+  if (req.method === "GET" && url.pathname === "/api/tempmail/status") {
+    return sendJSON(req, res, { ok: true, ownerToken: mocasusMail.ownerToken?.substring(0, 20) + "..." });
   }
 
   res.writeHead(404); res.end("Not found");
